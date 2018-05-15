@@ -936,12 +936,12 @@ class Heap {
   void update_external_memory(int64_t delta) { external_memory_ += delta; }
 
   void update_external_memory_concurrently_freed(intptr_t freed) {
-    external_memory_concurrently_freed_.Increment(freed);
+    external_memory_concurrently_freed_ += freed;
   }
 
   void account_external_memory_concurrently_freed() {
-    external_memory_ -= external_memory_concurrently_freed_.Value();
-    external_memory_concurrently_freed_.SetValue(0);
+    external_memory_ -= external_memory_concurrently_freed_;
+    external_memory_concurrently_freed_ = 0;
   }
 
   void CompactFixedArraysOfWeakCells();
@@ -2113,7 +2113,7 @@ class Heap {
     return old_generation_allocation_limit_;
   }
 
-  bool always_allocate() { return always_allocate_scope_count_.Value() != 0; }
+  bool always_allocate() { return always_allocate_scope_count_ != 0; }
 
   bool CanExpandOldGeneration(size_t size);
 
@@ -2157,7 +2157,22 @@ class Heap {
       int size_in_bytes, AllocationSpace space,
       AllocationAlignment aligment = kWordAligned);
 
-  HeapObject* AllocateRawWithRetry(
+  // This method will try to perform an allocation of a given size in a given
+  // space. If the allocation fails, a regular full garbage collection is
+  // triggered and the allocation is retried. This is performed multiple times.
+  // If after that retry procedure the allocation still fails nullptr is
+  // returned.
+  HeapObject* AllocateRawWithLigthRetry(
+      int size, AllocationSpace space,
+      AllocationAlignment alignment = kWordAligned);
+
+  // This method will try to perform an allocation of a given size in a given
+  // space. If the allocation fails, a regular full garbage collection is
+  // triggered and the allocation is retried. This is performed multiple times.
+  // If after that retry procedure the allocation still fails a "hammer"
+  // garbage collection is triggered which tries to significantly reduce memory.
+  // If the allocation still fails after that a fatal error is thrown.
+  HeapObject* AllocateRawWithRetryOrFail(
       int size, AllocationSpace space,
       AllocationAlignment alignment = kWordAligned);
   HeapObject* AllocateRawCodeInLargeObjectSpace(int size);
@@ -2166,6 +2181,11 @@ class Heap {
   V8_WARN_UNUSED_RESULT AllocationResult Allocate(Map* map,
                                                   AllocationSpace space);
 
+  // Takes a code object and checks if it is on memory which is not subject to
+  // compaction. This method will return a new code object on an immovable
+  // memory location if the original code object was movable.
+  HeapObject* EnsureImmovableCode(HeapObject* heap_object, int object_size);
+
   // Allocates a partial map for bootstrapping.
   V8_WARN_UNUSED_RESULT AllocationResult
   AllocatePartialMap(InstanceType instance_type, int instance_size);
@@ -2173,8 +2193,8 @@ class Heap {
   void FinalizePartialMap(Map* map);
 
   // Allocate empty fixed typed array of given type.
-  V8_WARN_UNUSED_RESULT AllocationResult AllocateEmptyFixedTypedArray(
-      ExternalArrayType array_type, AllocationSpace space = OLD_SPACE);
+  V8_WARN_UNUSED_RESULT AllocationResult
+  AllocateEmptyFixedTypedArray(ExternalArrayType array_type);
 
   void set_force_oom(bool value) { force_oom_ = value; }
 
@@ -2200,7 +2220,7 @@ class Heap {
   int64_t external_memory_at_last_mark_compact_;
 
   // The amount of memory that has been freed concurrently.
-  base::AtomicNumber<intptr_t> external_memory_concurrently_freed_;
+  std::atomic<intptr_t> external_memory_concurrently_freed_;
 
   // This can be calculated directly from a pointer to the heap; however, it is
   // more expedient to get at the isolate directly from within Heap methods.
@@ -2233,7 +2253,7 @@ class Heap {
 
   // This is not the depth of nested AlwaysAllocateScope's but rather a single
   // count, as scopes can be acquired from multiple tasks (read: threads).
-  base::AtomicNumber<size_t> always_allocate_scope_count_;
+  std::atomic<size_t> always_allocate_scope_count_;
 
   // Stores the memory pressure level that set by MemoryPressureNotification
   // and reset by a mark-compact garbage collection.

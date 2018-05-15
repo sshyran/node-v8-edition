@@ -78,7 +78,6 @@
 #include "src/value-serializer.h"
 #include "src/version.h"
 #include "src/vm-state-inl.h"
-#include "src/wasm/compilation-manager.h"
 #include "src/wasm/streaming-decoder.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -235,20 +234,17 @@ class CallDepthScope {
       : isolate_(isolate),
         context_(context),
         escaped_(false),
-        save_for_termination_(isolate->next_v8_call_is_safe_for_termination()) {
+        safe_for_termination_(isolate->next_v8_call_is_safe_for_termination()),
+        interrupts_scope_(isolate_, i::StackGuard::TERMINATE_EXECUTION,
+                          isolate_->only_terminate_in_safe_scope()
+                              ? (safe_for_termination_
+                                     ? i::InterruptsScope::kRunInterrupts
+                                     : i::InterruptsScope::kPostponeInterrupts)
+                              : i::InterruptsScope::kNoop) {
     // TODO(dcarney): remove this when blink stops crashing.
     DCHECK(!isolate_->external_caught_exception());
     isolate_->handle_scope_implementer()->IncrementCallDepth();
     isolate_->set_next_v8_call_is_safe_for_termination(false);
-    if (isolate_->only_terminate_in_safe_scope()) {
-      if (save_for_termination_) {
-        interrupts_scope_.reset(new i::SafeForInterruptsScope(
-            isolate_, i::StackGuard::TERMINATE_EXECUTION));
-      } else {
-        interrupts_scope_.reset(new i::PostponeInterruptsScope(
-            isolate_, i::StackGuard::TERMINATE_EXECUTION));
-      }
-    }
     if (!context.IsEmpty()) {
       i::Handle<i::Context> env = Utils::OpenHandle(*context);
       i::HandleScopeImplementer* impl = isolate->handle_scope_implementer();
@@ -273,7 +269,7 @@ class CallDepthScope {
 #ifdef V8_CHECK_MICROTASKS_SCOPES_CONSISTENCY
     if (do_callback) CheckMicrotasksScopesConsistency(isolate_);
 #endif
-    isolate_->set_next_v8_call_is_safe_for_termination(save_for_termination_);
+    isolate_->set_next_v8_call_is_safe_for_termination(safe_for_termination_);
   }
 
   void Escape() {
@@ -290,8 +286,8 @@ class CallDepthScope {
   Local<Context> context_;
   bool escaped_;
   bool do_callback_;
-  bool save_for_termination_;
-  std::unique_ptr<i::InterruptsScope> interrupts_scope_;
+  bool safe_for_termination_;
+  i::InterruptsScope interrupts_scope_;
 };
 
 }  // namespace
@@ -2327,12 +2323,12 @@ Local<Value> Module::GetModuleNamespace() {
   return ToApiHandle<Value>(module_namespace);
 }
 
-Local<UnboundScript> Module::GetUnboundScript() {
+Local<UnboundModuleScript> Module::GetUnboundModuleScript() {
   Utils::ApiCheck(
       GetStatus() < kEvaluating, "v8::Module::GetUnboundScript",
       "v8::Module::GetUnboundScript must be used on an unevaluated module");
   i::Handle<i::Module> self = Utils::OpenHandle(this);
-  return ToApiHandle<UnboundScript>(
+  return ToApiHandle<UnboundModuleScript>(
       i::Handle<i::SharedFunctionInfo>(self->GetSharedFunctionInfo()));
 }
 
@@ -2673,6 +2669,16 @@ ScriptCompiler::CachedData* ScriptCompiler::CreateCodeCache(
   i::Handle<i::SharedFunctionInfo> shared =
       i::Handle<i::SharedFunctionInfo>::cast(
           Utils::OpenHandle(*unbound_script));
+  DCHECK(shared->is_toplevel());
+  return i::CodeSerializer::Serialize(shared);
+}
+
+// static
+ScriptCompiler::CachedData* ScriptCompiler::CreateCodeCache(
+    Local<UnboundModuleScript> unbound_module_script) {
+  i::Handle<i::SharedFunctionInfo> shared =
+      i::Handle<i::SharedFunctionInfo>::cast(
+          Utils::OpenHandle(*unbound_module_script));
   DCHECK(shared->is_toplevel());
   return i::CodeSerializer::Serialize(shared);
 }
@@ -7410,9 +7416,7 @@ MaybeLocal<Proxy> Proxy::New(Local<Context> context, Local<Object> local_target,
 Local<String> WasmCompiledModule::GetWasmWireBytes() {
   i::Handle<i::WasmModuleObject> obj =
       i::Handle<i::WasmModuleObject>::cast(Utils::OpenHandle(this));
-  i::Handle<i::WasmCompiledModule> compiled_part =
-      i::handle(obj->compiled_module());
-  i::Handle<i::String> wire_bytes(compiled_part->shared()->module_bytes());
+  i::Handle<i::String> wire_bytes(obj->shared()->module_bytes());
   return Local<String>::Cast(Utils::ToLocal(wire_bytes));
 }
 
@@ -7465,17 +7469,16 @@ MaybeLocal<WasmCompiledModule> WasmCompiledModule::Deserialize(
     const WasmCompiledModule::CallerOwnedBuffer& serialized_module,
     const WasmCompiledModule::CallerOwnedBuffer& wire_bytes) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  i::MaybeHandle<i::WasmCompiledModule> maybe_compiled_module =
+  i::MaybeHandle<i::WasmModuleObject> maybe_module_object =
       i::wasm::DeserializeNativeModule(
           i_isolate, {serialized_module.first, serialized_module.second},
           {wire_bytes.first, wire_bytes.second});
-  i::Handle<i::WasmCompiledModule> compiled_module;
-  if (!maybe_compiled_module.ToHandle(&compiled_module)) {
+  i::Handle<i::WasmModuleObject> module_object;
+  if (!maybe_module_object.ToHandle(&module_object)) {
     return MaybeLocal<WasmCompiledModule>();
   }
   return Local<WasmCompiledModule>::Cast(
-      Utils::ToLocal(i::Handle<i::JSObject>::cast(
-          i::WasmModuleObject::New(i_isolate, compiled_module))));
+      Utils::ToLocal(i::Handle<i::JSObject>::cast(module_object)));
 }
 
 MaybeLocal<WasmCompiledModule> WasmCompiledModule::DeserializeOrCompile(
@@ -7516,11 +7519,8 @@ WasmModuleObjectBuilderStreaming::WasmModuleObjectBuilderStreaming(
 
   i::Handle<i::JSPromise> promise = Utils::OpenHandle(*GetPromise());
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  streaming_decoder_ =
-      i_isolate->wasm_engine()
-          ->compilation_manager()
-          ->StartStreamingCompilation(i_isolate, handle(i_isolate->context()),
-                                      promise);
+  streaming_decoder_ = i_isolate->wasm_engine()->StartStreamingCompilation(
+      i_isolate, handle(i_isolate->context()), promise);
 }
 
 Local<Promise> WasmModuleObjectBuilderStreaming::GetPromise() {
@@ -8020,7 +8020,7 @@ HeapProfiler* Isolate::GetHeapProfiler() {
 
 CpuProfiler* Isolate::GetCpuProfiler() {
   i::CpuProfiler* cpu_profiler =
-      reinterpret_cast<i::Isolate*>(this)->cpu_profiler();
+      reinterpret_cast<i::Isolate*>(this)->EnsureCpuProfiler();
   return reinterpret_cast<CpuProfiler*>(cpu_profiler);
 }
 
@@ -8688,7 +8688,7 @@ int Isolate::ContextDisposedNotification(bool dependant_context) {
   if (!dependant_context) {
     // We left the current context, we can abort all running WebAssembly
     // compilations.
-    isolate->wasm_engine()->compilation_manager()->AbortAllJobs();
+    isolate->wasm_engine()->AbortAllCompileJobs();
   }
   // TODO(ahaas): move other non-heap activity out of the heap call.
   return isolate->heap()->NotifyContextDisposed(dependant_context);

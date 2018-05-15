@@ -846,18 +846,21 @@ torque_files = [
   "src/builtins/base.tq",
   "src/builtins/array.tq",
   "src/builtins/typed-array.tq",
+  "test/torque/test-torque.tq",
 ]
 
 torque_modules = [
   "base",
   "array",
   "typed-array",
+  "test",
 ]
 
 action("run_torque") {
   visibility = [
     ":*",
     "tools/gcmole/:*",
+    "test/cctest/:*",
   ]
 
   # We reuse the snapshot toolchain for building torque to not build v8_libbase
@@ -2040,6 +2043,7 @@ v8_source_set("v8_base") {
     "src/lookup-cache.h",
     "src/lookup.cc",
     "src/lookup.h",
+    "src/lsan.h",
     "src/machine-type.cc",
     "src/machine-type.h",
     "src/macro-assembler-inl.h",
@@ -2377,8 +2381,6 @@ v8_source_set("v8_base") {
     "src/wasm/baseline/liftoff-compiler.cc",
     "src/wasm/baseline/liftoff-compiler.h",
     "src/wasm/baseline/liftoff-register.h",
-    "src/wasm/compilation-manager.cc",
-    "src/wasm/compilation-manager.h",
     "src/wasm/decoder.h",
     "src/wasm/function-body-decoder-impl.h",
     "src/wasm/function-body-decoder.cc",

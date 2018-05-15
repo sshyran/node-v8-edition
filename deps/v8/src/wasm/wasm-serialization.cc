@@ -65,6 +65,18 @@ class Writer {
     }
   }
 
+  void Align(size_t alignment) {
+    size_t num_written_bytes = bytes_written();
+    if (num_written_bytes % alignment) {
+      size_t padding = alignment - num_written_bytes % alignment;
+      pos_ = pos_ + padding;
+      if (FLAG_wasm_trace_serialization) {
+        OFStream os(stdout);
+        os << "wrote padding, sized: " << padding << std::endl;
+      }
+    }
+  }
+
  private:
   byte* const start_;
   byte* const end_;
@@ -105,6 +117,18 @@ class Reader {
     if (FLAG_wasm_trace_serialization) {
       OFStream os(stdout);
       os << "read vector of " << v.size() << " elements" << std::endl;
+    }
+  }
+
+  void Align(size_t alignment) {
+    size_t num_read_bytes = bytes_read();
+    if (num_read_bytes % alignment) {
+      size_t padding = alignment - num_read_bytes % alignment;
+      pos_ = pos_ + padding;
+      if (FLAG_wasm_trace_serialization) {
+        OFStream os(stdout);
+        os << "read padding, sized: " << padding << std::endl;
+      }
     }
   }
 
@@ -261,6 +285,9 @@ size_t NativeModuleSerializer::Measure() const {
   uint32_t total_fns = native_module_->function_count();
   for (uint32_t i = first_wasm_fn; i < total_fns; ++i) {
     size += kCodeHeaderSize;
+    // Code start needs to be kPointerSize aligned
+    // TODO(all) Remove padding after code reallocation is removed
+    size = RoundUp(size, kPointerSize);
     size += MeasureCode(native_module_->code(i));
   }
   return size;
@@ -303,6 +330,12 @@ void NativeModuleSerializer::WriteCode(const WasmCode* code, Writer* writer) {
   writer->Write(code->source_positions().size());
   writer->Write(code->protected_instructions().size());
   writer->Write(code->tier());
+  // Code start needs to be kPointerSize aligned, because
+  // code is reallocated after loaded into the read buffer,
+  // and code reallocation needs to be done on properly
+  // aligned code.
+  // TODO(all) Remove padding after code reallocation is removed
+  writer->Align(kPointerSize);
   // Get a pointer to the code buffer, which we have to relocate.
   byte* serialized_code_start = writer->current_buffer().start();
   // Now write the code, reloc info, source positions, and protected code.
@@ -483,6 +516,12 @@ bool NativeModuleDeserializer::ReadCode(uint32_t fn_index, Reader* reader) {
   size_t source_position_size = reader->Read<size_t>();
   size_t protected_instructions_size = reader->Read<size_t>();
   WasmCode::Tier tier = reader->Read<WasmCode::Tier>();
+  // Code start needs to be kPointerSize aligned, because
+  // code is reallocated after loaded into the read buffer,
+  // and code reallocation needs to be done on properly
+  // aligned code.
+  // TODO(all) Remove padding after code reallocation is removed
+  reader->Align(kPointerSize);
 
   Vector<const byte> code_buffer = {reader->current_location(), code_size};
   reader->Skip(code_size);
@@ -518,7 +557,8 @@ bool NativeModuleDeserializer::ReadCode(uint32_t fn_index, Reader* reader) {
   int mask = RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
              RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
              RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY) |
-             RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE);
+             RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
+             RelocInfo::ModeMask(RelocInfo::WASM_CODE_TABLE_ENTRY);
   for (RelocIterator iter(ret->instructions(), ret->reloc_info(),
                           ret->constant_pool(), mask);
        !iter.done(); iter.next()) {
@@ -552,6 +592,15 @@ bool NativeModuleDeserializer::ReadCode(uint32_t fn_index, Reader* reader) {
         iter.rinfo()->set_target_external_reference(address, SKIP_ICACHE_FLUSH);
         break;
       }
+      case RelocInfo::WASM_CODE_TABLE_ENTRY: {
+        DCHECK(FLAG_wasm_tier_up);
+        DCHECK(ret->is_liftoff());
+        WasmCode* const* code_table_entry =
+            native_module_->code_table().data() + ret->index();
+        iter.rinfo()->set_wasm_code_table_entry(
+            reinterpret_cast<Address>(code_table_entry), SKIP_ICACHE_FLUSH);
+        break;
+      }
       default:
         UNREACHABLE();
     }
@@ -575,7 +624,7 @@ Address NativeModuleDeserializer::GetTrampolineOrStubFromTag(uint32_t tag) {
   }
 }
 
-MaybeHandle<WasmCompiledModule> DeserializeNativeModule(
+MaybeHandle<WasmModuleObject> DeserializeNativeModule(
     Isolate* isolate, Vector<const byte> data, Vector<const byte> wire_bytes) {
   if (!IsWasmCodegenAllowed(isolate, isolate->native_context())) {
     return {};
@@ -615,8 +664,7 @@ MaybeHandle<WasmCompiledModule> DeserializeNativeModule(
   wasm::ModuleEnv env(shared->module(), use_trap_handler,
                       wasm::RuntimeExceptionSupport::kRuntimeExceptionSupport);
   Handle<WasmCompiledModule> compiled_module =
-      WasmCompiledModule::New(isolate, shared->module(), export_wrappers, env);
-  compiled_module->set_shared(*shared);
+      WasmCompiledModule::New(isolate, shared->module(), env);
   compiled_module->GetNativeModule()->SetSharedModuleData(shared);
   NativeModuleDeserializer deserializer(isolate,
                                         compiled_module->GetNativeModule());
@@ -624,14 +672,20 @@ MaybeHandle<WasmCompiledModule> DeserializeNativeModule(
   Reader reader(data + kVersionSize);
   if (!deserializer.Read(&reader)) return {};
 
+  Handle<WasmModuleObject> module_object =
+      WasmModuleObject::New(isolate, compiled_module, export_wrappers, shared);
+
   // TODO(6792): Wrappers below might be cloned using {Factory::CopyCode}. This
   // requires unlocking the code space here. This should eventually be moved
   // into the allocator.
   CodeSpaceMemoryModificationScope modification_scope(isolate->heap());
-  CompileJsToWasmWrappers(isolate, compiled_module, isolate->counters());
-  WasmCompiledModule::ReinitializeAfterDeserialization(isolate,
-                                                       compiled_module);
-  return compiled_module;
+  CompileJsToWasmWrappers(isolate, module_object, isolate->counters());
+
+  // There are no instances for this module yet, which means we need to reset
+  // the module into a state as if the last instance was collected.
+  WasmCompiledModule::Reset(isolate, *compiled_module);
+
+  return module_object;
 }
 
 }  // namespace wasm

@@ -1224,13 +1224,10 @@ void PromiseReactionJobTask::PromiseReactionJobTaskVerify() {
   VerifyHeapPointer(context());
   CHECK(context()->IsContext());
   VerifyHeapPointer(handler());
-  VerifyHeapPointer(payload());
-  if (handler()->IsCode()) {
-    CHECK(payload()->IsJSReceiver());
-  } else {
-    CHECK(handler()->IsUndefined(isolate) || handler()->IsCallable());
-    CHECK(payload()->IsJSPromise() || payload()->IsPromiseCapability());
-  }
+  CHECK(handler()->IsUndefined(isolate) || handler()->IsCallable());
+  VerifyHeapPointer(promise_or_capability());
+  CHECK(promise_or_capability()->IsJSPromise() ||
+        promise_or_capability()->IsPromiseCapability());
 }
 
 void PromiseFulfillReactionJobTask::PromiseFulfillReactionJobTaskVerify() {
@@ -1272,18 +1269,14 @@ void PromiseReaction::PromiseReactionVerify() {
   VerifyPointer(next());
   CHECK(next()->IsSmi() || next()->IsPromiseReaction());
   VerifyHeapPointer(reject_handler());
+  CHECK(reject_handler()->IsUndefined(isolate) ||
+        reject_handler()->IsCallable());
   VerifyHeapPointer(fulfill_handler());
-  VerifyHeapPointer(payload());
-  if (reject_handler()->IsCode()) {
-    CHECK(fulfill_handler()->IsCode());
-    CHECK(payload()->IsJSReceiver());
-  } else {
-    CHECK(reject_handler()->IsUndefined(isolate) ||
-          reject_handler()->IsCallable());
-    CHECK(fulfill_handler()->IsUndefined(isolate) ||
-          fulfill_handler()->IsCallable());
-    CHECK(payload()->IsJSPromise() || payload()->IsPromiseCapability());
-  }
+  CHECK(fulfill_handler()->IsUndefined(isolate) ||
+        fulfill_handler()->IsCallable());
+  VerifyHeapPointer(promise_or_capability());
+  CHECK(promise_or_capability()->IsJSPromise() ||
+        promise_or_capability()->IsPromiseCapability());
 }
 
 void JSPromise::JSPromiseVerify() {
@@ -1301,24 +1294,22 @@ void SmallOrderedHashTable<Derived>::SmallOrderedHashTableVerify() {
   CHECK(IsSmallOrderedHashTable());
   Isolate* isolate = GetIsolate();
 
+  int capacity = Capacity();
+  CHECK_GE(capacity, kMinCapacity);
+  CHECK_LE(capacity, kMaxCapacity);
+
   for (int entry = 0; entry < NumberOfBuckets(); entry++) {
     int bucket = GetFirstEntry(entry);
     if (bucket == kNotFound) continue;
-
-    for (int offset = 0; offset < Derived::kEntrySize; offset++) {
-      Object* val = GetDataEntry(bucket, offset);
-      CHECK(!val->IsTheHole(isolate));
-    }
+    CHECK_GE(bucket, 0);
+    CHECK_LE(bucket, capacity);
   }
 
   for (int entry = 0; entry < NumberOfElements(); entry++) {
     int chain = GetNextEntry(entry);
     if (chain == kNotFound) continue;
-
-    for (int offset = 0; offset < Derived::kEntrySize; offset++) {
-      Object* val = GetDataEntry(chain, offset);
-      CHECK(!val->IsTheHole(isolate));
-    }
+    CHECK_GE(chain, 0);
+    CHECK_LE(chain, capacity);
   }
 
   for (int entry = 0; entry < NumberOfElements(); entry++) {
@@ -1328,7 +1319,16 @@ void SmallOrderedHashTable<Derived>::SmallOrderedHashTableVerify() {
     }
   }
 
-  for (int entry = NumberOfElements(); entry < Capacity(); entry++) {
+  for (int entry = NumberOfElements(); entry < NumberOfDeletedElements();
+       entry++) {
+    for (int offset = 0; offset < Derived::kEntrySize; offset++) {
+      Object* val = GetDataEntry(entry, offset);
+      CHECK(val->IsTheHole(isolate));
+    }
+  }
+
+  for (int entry = NumberOfElements() + NumberOfDeletedElements();
+       entry < Capacity(); entry++) {
     for (int offset = 0; offset < Derived::kEntrySize; offset++) {
       Object* val = GetDataEntry(entry, offset);
       CHECK(val->IsTheHole(isolate));
@@ -1553,8 +1553,6 @@ void Tuple3::Tuple3Verify() {
 
 void WasmCompiledModule::WasmCompiledModuleVerify() {
   CHECK(IsWasmCompiledModule());
-  VerifyObjectField(kSharedOffset);
-  VerifyObjectField(kExportWrappersOffset);
   VerifyObjectField(kNextInstanceOffset);
   VerifyObjectField(kPrevInstanceOffset);
   VerifyObjectField(kOwningInstanceOffset);

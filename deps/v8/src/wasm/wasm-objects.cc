@@ -15,7 +15,6 @@
 #include "src/wasm/module-compiler.h"
 #include "src/wasm/module-decoder.h"
 #include "src/wasm/wasm-code-manager.h"
-#include "src/wasm/wasm-code-specialization.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-limits.h"
 #include "src/wasm/wasm-memory.h"
@@ -262,15 +261,18 @@ enum DispatchTableElements : int {
 }  // namespace
 
 Handle<WasmModuleObject> WasmModuleObject::New(
-    Isolate* isolate, Handle<WasmCompiledModule> compiled_module) {
+    Isolate* isolate, Handle<WasmCompiledModule> compiled_module,
+    Handle<FixedArray> export_wrappers, Handle<WasmSharedModuleData> shared) {
   Handle<JSFunction> module_cons(
       isolate->native_context()->wasm_module_constructor());
   auto module_object = Handle<WasmModuleObject>::cast(
       isolate->factory()->NewJSObject(module_cons));
   module_object->set_compiled_module(*compiled_module);
-  if (compiled_module->shared()->script()->type() == Script::TYPE_WASM) {
-    compiled_module->shared()->script()->set_wasm_module_object(*module_object);
+  module_object->set_export_wrappers(*export_wrappers);
+  if (shared->script()->type() == Script::TYPE_WASM) {
+    shared->script()->set_wasm_module_object(*module_object);
   }
+  module_object->set_shared(*shared);
 
   compiled_module->LogWasmCodes(isolate);
   return module_object;
@@ -757,7 +759,7 @@ void WasmInstanceObject::SetRawMemory(byte* mem_start, uint32_t mem_size) {
 }
 
 WasmModule* WasmInstanceObject::module() {
-  return compiled_module()->shared()->module();
+  return module_object()->shared()->module();
 }
 
 Handle<WasmDebugInfo> WasmInstanceObject::GetOrCreateDebugInfo(
@@ -781,9 +783,9 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
 
   // Initialize the imported function arrays.
   auto num_imported_functions =
-      compiled_module->shared()->module()->num_imported_functions;
+      module_object->shared()->module()->num_imported_functions;
   auto num_imported_mutable_globals =
-      compiled_module->shared()->module()->num_imported_mutable_globals;
+      module_object->shared()->module()->num_imported_mutable_globals;
   auto native_allocations = Managed<WasmInstanceNativeAllocations>::Allocate(
       isolate, instance, num_imported_functions, num_imported_mutable_globals);
   instance->set_managed_native_allocations(*native_allocations);
@@ -1347,14 +1349,11 @@ MaybeHandle<FixedArray> WasmSharedModuleData::CheckBreakPoints(
   return break_points_hit;
 }
 
-Handle<WasmCompiledModule> WasmCompiledModule::New(
-    Isolate* isolate, WasmModule* module, Handle<FixedArray> export_wrappers,
-    wasm::ModuleEnv& env) {
+Handle<WasmCompiledModule> WasmCompiledModule::New(Isolate* isolate,
+                                                   WasmModule* module,
+                                                   wasm::ModuleEnv& env) {
   Handle<WasmCompiledModule> compiled_module = Handle<WasmCompiledModule>::cast(
       isolate->factory()->NewStruct(WASM_COMPILED_MODULE_TYPE, TENURED));
-  if (!export_wrappers.is_null()) {
-    compiled_module->set_export_wrappers(*export_wrappers);
-  }
   compiled_module->set_weak_owning_instance(isolate->heap()->empty_weak_cell());
   {
     auto native_module =
@@ -1375,8 +1374,6 @@ Handle<WasmCompiledModule> WasmCompiledModule::Clone(
   Handle<FixedArray> code_copy;
   Handle<WasmCompiledModule> ret = Handle<WasmCompiledModule>::cast(
       isolate->factory()->NewStruct(WASM_COMPILED_MODULE_TYPE, TENURED));
-  ret->set_shared(module->shared());
-  ret->set_export_wrappers(module->export_wrappers());
   ret->set_weak_owning_instance(isolate->heap()->empty_weak_cell());
   ret->set_native_module(module->native_module());
 
@@ -1408,25 +1405,6 @@ void WasmCompiledModule::Reset(Isolate* isolate,
   TRACE("Resetting %zu\n", native_module->instance_id);
   if (native_module->use_trap_handler()) {
     native_module->ReleaseProtectedInstructions();
-  }
-
-  // Patch code to update memory references, global references, and function
-  // table references.
-  wasm::CodeSpecialization code_specialization;
-
-  for (uint32_t i = native_module->num_imported_functions(),
-                end = native_module->function_count();
-       i < end; ++i) {
-    wasm::WasmCode* code = native_module->code(i);
-    // Skip lazy compile stubs.
-    if (code == nullptr || code->kind() != wasm::WasmCode::kFunction) continue;
-    bool changed = code_specialization.ApplyToWasmCode(code, SKIP_ICACHE_FLUSH);
-    // TODO(wasm): Check if this is faster than passing FLUSH_ICACHE_IF_NEEDED
-    // above.
-    if (changed) {
-      Assembler::FlushICache(code->instructions().start(),
-                             code->instructions().size());
-    }
   }
 }
 
@@ -1486,13 +1464,6 @@ void WasmCompiledModule::RemoveFromChain() {
   if (!next->IsUndefined(isolate)) {
     WasmCompiledModule::cast(next)->set_raw_prev_instance(prev);
   }
-}
-
-void WasmCompiledModule::ReinitializeAfterDeserialization(
-    Isolate* isolate, Handle<WasmCompiledModule> compiled_module) {
-  // Reset, but don't delete any global handles, because their owning instance
-  // may still be active.
-  WasmCompiledModule::Reset(isolate, *compiled_module);
 }
 
 MaybeHandle<String> WasmSharedModuleData::GetModuleNameOrNull(
@@ -1583,13 +1554,10 @@ void WasmCompiledModule::LogWasmCodes(Isolate* isolate) {
   wasm::NativeModule* native_module = GetNativeModule();
   if (native_module == nullptr) return;
   const uint32_t number_of_codes = native_module->function_count();
-  if (has_shared()) {
-    Handle<WasmSharedModuleData> shared_handle(shared(), isolate);
-    for (uint32_t i = 0; i < number_of_codes; i++) {
-      wasm::WasmCode* code = native_module->code(i);
-      if (code == nullptr) continue;
-      code->LogCode(isolate);
-    }
+  for (uint32_t i = 0; i < number_of_codes; i++) {
+    wasm::WasmCode* code = native_module->code(i);
+    if (code == nullptr) continue;
+    code->LogCode(isolate);
   }
 }
 

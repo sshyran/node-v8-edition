@@ -227,18 +227,6 @@ Address CodeRange::AllocateRawMemory(const size_t requested_size,
   return current.start;
 }
 
-
-bool CodeRange::CommitRawMemory(Address start, size_t length) {
-  return isolate_->heap()->memory_allocator()->CommitMemory(start, length);
-}
-
-
-bool CodeRange::UncommitRawMemory(Address start, size_t length) {
-  return virtual_memory_.SetPermissions(start, length,
-                                        PageAllocator::kNoAccess);
-}
-
-
 void CodeRange::FreeRawMemory(Address address, size_t length) {
   DCHECK(IsAddressAligned(address, MemoryChunk::kAlignment));
   base::LockGuard<base::Mutex> guard(&code_range_mutex_);
@@ -882,8 +870,8 @@ MemoryChunk* MemoryAllocator::AllocateChunk(size_t reserve_area_size,
     }
 
     if (Heap::ShouldZapGarbage()) {
-      ZapBlock(base, CodePageGuardStartOffset(), kZapValue);
-      ZapBlock(base + CodePageAreaStartOffset(), commit_area_size, kZapValue);
+      ZapBlock(base, CodePageGuardStartOffset());
+      ZapBlock(base + CodePageAreaStartOffset(), commit_area_size);
     }
 
     area_start = base + CodePageAreaStartOffset();
@@ -901,7 +889,7 @@ MemoryChunk* MemoryAllocator::AllocateChunk(size_t reserve_area_size,
     if (base == kNullAddress) return nullptr;
 
     if (Heap::ShouldZapGarbage()) {
-      ZapBlock(base, Page::kObjectStartOffset + commit_area_size, kZapValue);
+      ZapBlock(base, Page::kObjectStartOffset + commit_area_size);
     }
 
     area_start = base + Page::kObjectStartOffset;
@@ -1191,8 +1179,9 @@ MemoryChunk* MemoryAllocator::AllocatePagePooled(SpaceType* owner) {
 bool MemoryAllocator::CommitBlock(Address start, size_t size) {
   if (!CommitMemory(start, size)) return false;
 
-  ZapBlock(start, size,
-           Heap::ShouldZapGarbage() ? kZapValue : kClearedFreeMemoryValue);
+  if (Heap::ShouldZapGarbage()) {
+    ZapBlock(start, size);
+  }
 
   isolate_->counters()->memory_allocated()->Increment(static_cast<int>(size));
   return true;
@@ -1205,10 +1194,10 @@ bool MemoryAllocator::UncommitBlock(Address start, size_t size) {
   return true;
 }
 
-void MemoryAllocator::ZapBlock(Address start, size_t size,
-                               uintptr_t zap_value) {
+
+void MemoryAllocator::ZapBlock(Address start, size_t size) {
   for (size_t s = 0; s + kPointerSize <= size; s += kPointerSize) {
-    Memory::Address_at(start + s) = static_cast<Address>(zap_value);
+    Memory::Address_at(start + s) = static_cast<Address>(kZapValue);
   }
 }
 
@@ -1475,7 +1464,7 @@ intptr_t Space::GetNextInlineAllocationStepSize() {
 
 PagedSpace::PagedSpace(Heap* heap, AllocationSpace space,
                        Executability executable)
-    : SpaceWithLinearArea(heap, space, executable), anchor_(this) {
+    : SpaceWithLinearArea(heap, space), executable_(executable), anchor_(this) {
   area_size_ = MemoryAllocator::PageAreaSize(space);
   accounting_stats_.Clear();
 }
@@ -1805,7 +1794,7 @@ void PagedSpace::FreeLinearAllocationArea() {
   // The code page of the linear allocation area needs to be unprotected
   // because we are going to write a filler into that memory area below.
   if (identity() == CODE_SPACE) {
-    heap_->UnprotectAndRegisterMemoryChunk(
+    heap()->UnprotectAndRegisterMemoryChunk(
         MemoryChunk::FromAddress(current_top));
   }
   Free(current_top, current_limit - current_top,
@@ -1839,7 +1828,7 @@ void PagedSpace::ReleasePage(Page* page) {
 void PagedSpace::SetReadAndExecutable() {
   DCHECK(identity() == CODE_SPACE);
   for (Page* page : *this) {
-    CHECK(heap_->memory_allocator()->IsMemoryChunkExecutable(page));
+    CHECK(heap()->memory_allocator()->IsMemoryChunkExecutable(page));
     page->SetReadAndExecutable();
   }
 }
@@ -1847,7 +1836,7 @@ void PagedSpace::SetReadAndExecutable() {
 void PagedSpace::SetReadAndWritable() {
   DCHECK(identity() == CODE_SPACE);
   for (Page* page : *this) {
-    CHECK(heap_->memory_allocator()->IsMemoryChunkExecutable(page));
+    CHECK(heap()->memory_allocator()->IsMemoryChunkExecutable(page));
     page->SetReadAndWritable();
   }
 }
@@ -1901,7 +1890,7 @@ bool PagedSpace::RefillLinearAllocationAreaFromFreeList(size_t size_in_bytes) {
   DCHECK_LE(size_in_bytes, limit - start);
   if (limit != end) {
     if (identity() == CODE_SPACE) {
-      heap_->UnprotectAndRegisterMemoryChunk(page);
+      heap()->UnprotectAndRegisterMemoryChunk(page);
     }
     Free(limit, end - limit, SpaceAccountingMode::kSpaceAccounted);
   }
@@ -2135,7 +2124,7 @@ bool SemiSpace::EnsureCurrentCapacity() {
       actual_pages++;
       current_page =
           heap()->memory_allocator()->AllocatePage<MemoryAllocator::kPooled>(
-              Page::kAllocatableMemory, this, executable());
+              Page::kAllocatableMemory, this, NOT_EXECUTABLE);
       if (current_page == nullptr) return false;
       DCHECK_NOT_NULL(current_page);
       current_page->InsertAfter(anchor());
@@ -2451,7 +2440,7 @@ bool SemiSpace::Commit() {
   for (int pages_added = 0; pages_added < num_pages; pages_added++) {
     Page* new_page =
         heap()->memory_allocator()->AllocatePage<MemoryAllocator::kPooled>(
-            Page::kAllocatableMemory, this, executable());
+            Page::kAllocatableMemory, this, NOT_EXECUTABLE);
     if (new_page == nullptr) {
       RewindPages(current, pages_added);
       return false;
@@ -2510,7 +2499,7 @@ bool SemiSpace::GrowTo(size_t new_capacity) {
   for (int pages_added = 0; pages_added < delta_pages; pages_added++) {
     Page* new_page =
         heap()->memory_allocator()->AllocatePage<MemoryAllocator::kPooled>(
-            Page::kAllocatableMemory, this, executable());
+            Page::kAllocatableMemory, this, NOT_EXECUTABLE);
     if (new_page == nullptr) {
       RewindPages(last_page, pages_added);
       return false;
@@ -3283,7 +3272,7 @@ HeapObject* LargeObjectIterator::Next() {
 // LargeObjectSpace
 
 LargeObjectSpace::LargeObjectSpace(Heap* heap, AllocationSpace id)
-    : Space(heap, id, NOT_EXECUTABLE),  // Managed on a per-allocation basis
+    : Space(heap, id),  // Managed on a per-allocation basis
       first_page_(nullptr),
       size_(0),
       page_count_(0),

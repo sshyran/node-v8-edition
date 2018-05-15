@@ -69,14 +69,14 @@ void CodeSpecialization::RelocateDirectCalls(NativeModule* native_module) {
 }
 
 bool CodeSpecialization::ApplyToWholeModule(
-    NativeModule* native_module, Handle<WasmCompiledModule> compiled_module,
+    NativeModule* native_module, Handle<WasmModuleObject> module_object,
     ICacheFlushMode icache_flush_mode) {
   DisallowHeapAllocation no_gc;
-  WasmSharedModuleData* shared = compiled_module->shared();
+  WasmSharedModuleData* shared = module_object->shared();
   WasmModule* module = shared->module();
   std::vector<WasmFunction>* wasm_functions = &shared->module()->functions;
-  DCHECK_EQ(compiled_module->export_wrappers()->length(),
-            shared->module()->num_exported_functions);
+  FixedArray* export_wrappers = module_object->export_wrappers();
+  DCHECK_EQ(export_wrappers->length(), module->num_exported_functions);
 
   bool changed = false;
   int func_index = module->num_imported_functions;
@@ -106,8 +106,7 @@ bool CodeSpecialization::ApplyToWholeModule(
   int wrapper_index = 0;
   for (auto exp : module->export_table) {
     if (exp.kind != kExternalFunction) continue;
-    Code* export_wrapper =
-        Code::cast(compiled_module->export_wrappers()->get(wrapper_index++));
+    Code* export_wrapper = Code::cast(export_wrappers->get(wrapper_index++));
     if (export_wrapper->kind() != Code::JS_TO_WASM_FUNCTION) continue;
     for (RelocIterator it(export_wrapper, reloc_mode); !it.done(); it.next()) {
       RelocInfo::Mode mode = it.rinfo()->rmode();
@@ -125,7 +124,7 @@ bool CodeSpecialization::ApplyToWholeModule(
     }
   }
   DCHECK_EQ(module->functions.size(), func_index);
-  DCHECK_EQ(compiled_module->export_wrappers()->length(), wrapper_index);
+  DCHECK_EQ(export_wrappers->length(), wrapper_index);
   return changed;
 }
 
@@ -137,14 +136,10 @@ bool CodeSpecialization::ApplyToWasmCode(wasm::WasmCode* code,
   bool reloc_direct_calls = relocate_direct_calls_module_ != nullptr;
 
   int reloc_mode = 0;
-  auto add_mode = [&reloc_mode](bool cond, RelocInfo::Mode mode) {
-    if (cond) reloc_mode |= RelocInfo::ModeMask(mode);
-  };
-  add_mode(reloc_direct_calls, RelocInfo::WASM_CALL);
-
-  // Always patch the code table entry address which is used in Liftoff
-  // prologue to jump to optimized code if existent.
-  reloc_mode |= RelocInfo::ModeMask(RelocInfo::WASM_CODE_TABLE_ENTRY);
+  if (reloc_direct_calls) {
+    reloc_mode |= RelocInfo::ModeMask(RelocInfo::WASM_CALL);
+  }
+  if (!reloc_mode) return false;
 
   base::Optional<PatchDirectCallsHelper> patch_direct_calls_helper;
   bool changed = false;
@@ -177,14 +172,6 @@ bool CodeSpecialization::ApplyToWasmCode(wasm::WasmCode* code,
         it.rinfo()->set_wasm_call_address(new_code->instruction_start(),
                                           icache_flush_mode);
         changed = true;
-      } break;
-      case RelocInfo::WASM_CODE_TABLE_ENTRY: {
-        DCHECK(FLAG_wasm_tier_up);
-        DCHECK(code->is_liftoff());
-        WasmCode* const* code_table_entry =
-            native_module->code_table().data() + code->index();
-        it.rinfo()->set_wasm_code_table_entry(
-            reinterpret_cast<Address>(code_table_entry), icache_flush_mode);
       } break;
 
       default:

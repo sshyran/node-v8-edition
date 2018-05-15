@@ -391,6 +391,11 @@ void LiftoffAssembler::FillI64Half(Register, uint32_t half_index) {
   void LiftoffAssembler::emit_##name(DoubleRegister dst, DoubleRegister src) { \
     instruction(dst.D(), src.D());                                             \
   }
+#define FP64_UNOP_RETURN_TRUE(name, instruction)                               \
+  bool LiftoffAssembler::emit_##name(DoubleRegister dst, DoubleRegister src) { \
+    instruction(dst.D(), src.D());                                             \
+    return true;                                                               \
+  }
 #define I32_SHIFTOP(name, instruction)                                         \
   void LiftoffAssembler::emit_##name(Register dst, Register src,               \
                                      Register amount, LiftoffRegList pinned) { \
@@ -441,10 +446,10 @@ FP64_BINOP(f64_min, Fmin)
 FP64_BINOP(f64_max, Fmax)
 FP64_UNOP(f64_abs, Fabs)
 FP64_UNOP(f64_neg, Fneg)
-FP64_UNOP(f64_ceil, Frintp)
-FP64_UNOP(f64_floor, Frintm)
-FP64_UNOP(f64_trunc, Frintz)
-FP64_UNOP(f64_nearest_int, Frintn)
+FP64_UNOP_RETURN_TRUE(f64_ceil, Frintp)
+FP64_UNOP_RETURN_TRUE(f64_floor, Frintm)
+FP64_UNOP_RETURN_TRUE(f64_trunc, Frintz)
+FP64_UNOP_RETURN_TRUE(f64_nearest_int, Frintn)
 FP64_UNOP(f64_sqrt, Fsqrt)
 
 #undef I32_BINOP
@@ -453,6 +458,7 @@ FP64_UNOP(f64_sqrt, Fsqrt)
 #undef FP32_UNOP
 #undef FP64_BINOP
 #undef FP64_UNOP
+#undef FP64_UNOP_RETURN_TRUE
 #undef I32_SHIFTOP
 #undef I64_SHIFTOP
 
@@ -686,21 +692,61 @@ void LiftoffAssembler::CallC(wasm::FunctionSig* sig,
                              const LiftoffRegister* rets,
                              ValueType out_argument_type, int stack_bytes,
                              ExternalReference ext_ref) {
-  BAILOUT("CallC");
+  // The stack pointer is required to be quadword aligned.
+  int total_size = RoundUp(stack_bytes, kQuadWordSizeInBytes);
+  // Reserve space in the stack.
+  Claim(total_size, 1);
+
+  int arg_bytes = 0;
+  for (ValueType param_type : sig->parameters()) {
+    Poke(liftoff::GetRegFromType(*args++, param_type), arg_bytes);
+    arg_bytes += ValueTypes::MemSize(param_type);
+  }
+  DCHECK_LE(arg_bytes, stack_bytes);
+
+  // Pass a pointer to the buffer with the arguments to the C function.
+  Mov(x0, sp);
+
+  // Now call the C function.
+  constexpr int kNumCCallArgs = 1;
+  CallCFunction(ext_ref, kNumCCallArgs);
+
+  // Move return value to the right register.
+  const LiftoffRegister* next_result_reg = rets;
+  if (sig->return_count() > 0) {
+    DCHECK_EQ(1, sig->return_count());
+    constexpr Register kReturnReg = x0;
+    if (kReturnReg != next_result_reg->gp()) {
+      Move(*next_result_reg, LiftoffRegister(kReturnReg), sig->GetReturn(0));
+    }
+    ++next_result_reg;
+  }
+
+  // Load potential output value from the buffer on the stack.
+  if (out_argument_type != kWasmStmt) {
+    Peek(liftoff::GetRegFromType(*next_result_reg, out_argument_type), 0);
+  }
+
+  Drop(total_size, 1);
 }
 
 void LiftoffAssembler::CallNativeWasmCode(Address addr) {
-  BAILOUT("CallNativeWasmCode");
+  Call(addr, RelocInfo::WASM_CALL);
 }
 
 void LiftoffAssembler::CallRuntime(Zone* zone, Runtime::FunctionId fid) {
-  BAILOUT("CallRuntime");
+  // Set context to zero.
+  Mov(cp, xzr);
+  CallRuntimeDelayed(zone, fid);
 }
 
 void LiftoffAssembler::CallIndirect(wasm::FunctionSig* sig,
                                     compiler::CallDescriptor* call_descriptor,
                                     Register target) {
-  BAILOUT("CallIndirect");
+  // For Arm64, we have more cache registers than wasm parameters. That means
+  // that target will always be in a register.
+  DCHECK(target.IsValid());
+  Call(target);
 }
 
 void LiftoffAssembler::AllocateStackSlot(Register addr, uint32_t size) {

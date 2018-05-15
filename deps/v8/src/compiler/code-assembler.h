@@ -380,7 +380,7 @@ class TNode {
   TNode() : node_(nullptr) {}
 
   TNode operator=(TNode other) {
-    DCHECK_NULL(node_);
+    DCHECK_NOT_NULL(other.node_);
     node_ = other.node_;
     return *this;
   }
@@ -1244,6 +1244,7 @@ class CodeAssemblerLabel {
   ~CodeAssemblerLabel();
 
   inline bool is_bound() const { return bound_; }
+  inline bool is_used() const { return merge_count_ != 0; }
 
  private:
   friend class CodeAssembler;

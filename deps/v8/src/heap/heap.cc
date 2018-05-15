@@ -141,6 +141,7 @@ Heap::Heap()
     : external_memory_(0),
       external_memory_limit_(kExternalAllocationSoftLimit),
       external_memory_at_last_mark_compact_(0),
+      external_memory_concurrently_freed_(0),
       isolate_(nullptr),
       code_range_size_(0),
       // semispace_size_ should be a power of 2 and old_generation_size_ should
@@ -1884,7 +1885,6 @@ void Heap::MinorMarkCompact() {
   AlwaysAllocateScope always_allocate(isolate());
   IncrementalMarking::PauseBlackAllocationScope pause_black_allocation(
       incremental_marking());
-  CodeSpaceMemoryModificationScope code_modifcation(this);
   ConcurrentMarking::PauseScope pause_scope(concurrent_marking());
 
   minor_mark_compact_collector()->CollectGarbage();
@@ -4522,10 +4522,36 @@ void Heap::DisableInlineAllocation() {
   }
 }
 
-HeapObject* Heap::AllocateRawWithRetry(int size, AllocationSpace space,
-                                       AllocationAlignment alignment) {
-  AllocationResult alloc = AllocateRaw(size, space, alignment);
+HeapObject* Heap::EnsureImmovableCode(HeapObject* heap_object,
+                                      int object_size) {
+  // Code objects which should stay at a fixed address are allocated either
+  // in the first page of code space, in large object space, or (during
+  // snapshot creation) the containing page is marked as immovable.
+  DCHECK(heap_object);
+  DCHECK(code_space_->Contains(heap_object));
+  DCHECK_GE(object_size, 0);
+  if (!Heap::IsImmovable(heap_object)) {
+    if (isolate()->serializer_enabled() ||
+        code_space_->FirstPage()->Contains(heap_object->address())) {
+      MemoryChunk::FromAddress(heap_object->address())->MarkNeverEvacuate();
+    } else {
+      // Discard the first code allocation, which was on a page where it could
+      // be moved.
+      CreateFillerObjectAt(heap_object->address(), object_size,
+                           ClearRecordedSlots::kNo);
+      heap_object = AllocateRawCodeInLargeObjectSpace(object_size);
+      UnprotectAndRegisterMemoryChunk(heap_object);
+      ZapCodeObject(heap_object->address(), object_size);
+      OnAllocationEvent(heap_object, object_size);
+    }
+  }
+  return heap_object;
+}
+
+HeapObject* Heap::AllocateRawWithLigthRetry(int size, AllocationSpace space,
+                                            AllocationAlignment alignment) {
   HeapObject* result;
+  AllocationResult alloc = AllocateRaw(size, space, alignment);
   if (alloc.To(&result)) {
     DCHECK(result != exception());
     return result;
@@ -4540,6 +4566,15 @@ HeapObject* Heap::AllocateRawWithRetry(int size, AllocationSpace space,
       return result;
     }
   }
+  return nullptr;
+}
+
+HeapObject* Heap::AllocateRawWithRetryOrFail(int size, AllocationSpace space,
+                                             AllocationAlignment alignment) {
+  AllocationResult alloc;
+  HeapObject* result = AllocateRawWithLigthRetry(size, space, alignment);
+  if (result) return result;
+
   isolate()->counters()->gc_last_resort_from_handles()->Increment();
   CollectAllAvailableGarbage(GarbageCollectionReason::kLastResort);
   {

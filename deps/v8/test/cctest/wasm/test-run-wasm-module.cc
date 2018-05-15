@@ -277,12 +277,10 @@ class WasmSerializationTest {
         v8::Utils::OpenHandle(*deserialized_module));
     {
       DisallowHeapAllocation assume_no_gc;
-      Handle<WasmCompiledModule> compiled_part(module_object->compiled_module(),
-                                               current_isolate());
       CHECK_EQ(
           memcmp(
               reinterpret_cast<const uint8_t*>(
-                  compiled_part->shared()->module_bytes()->GetCharsAddress()),
+                  module_object->shared()->module_bytes()->GetCharsAddress()),
               wire_bytes().first, wire_bytes().second),
           0);
     }
@@ -335,17 +333,19 @@ class WasmSerializationTest {
       HandleScope scope(serialization_isolate);
       testing::SetupIsolateForWasmModule(serialization_isolate);
 
-      MaybeHandle<WasmModuleObject> module_object =
+      MaybeHandle<WasmModuleObject> maybe_module_object =
           serialization_isolate->wasm_engine()->SyncCompile(
               serialization_isolate, &thrower,
               ModuleWireBytes(buffer.begin(), buffer.end()));
+      Handle<WasmModuleObject> module_object =
+          maybe_module_object.ToHandleChecked();
 
-      MaybeHandle<WasmCompiledModule> compiled_module(
-          module_object.ToHandleChecked()->compiled_module(),
-          serialization_isolate);
-      CHECK(!compiled_module.is_null());
+      Handle<WasmCompiledModule> compiled_module(
+          module_object->compiled_module());
+      Handle<FixedArray> export_wrappers(module_object->export_wrappers());
+      Handle<WasmSharedModuleData> shared(module_object->shared());
       Handle<JSObject> module_obj = WasmModuleObject::New(
-          serialization_isolate, compiled_module.ToHandleChecked());
+          serialization_isolate, compiled_module, export_wrappers, shared);
       v8::Local<v8::Object> v8_module_obj = v8::Utils::ToLocal(module_obj);
       CHECK(v8_module_obj->IsWebAssemblyCompiledModule());
 
@@ -1180,9 +1180,7 @@ TEST(AtomicOpDisassembly) {
         isolate->wasm_engine()->SyncCompile(
             isolate, &thrower, ModuleWireBytes(buffer.begin(), buffer.end()));
 
-    Handle<WasmCompiledModule> compiled_module(
-        module_object.ToHandleChecked()->compiled_module(), isolate);
-    compiled_module->shared()->DisassembleFunction(0);
+    module_object.ToHandleChecked()->shared()->DisassembleFunction(0);
   }
   Cleanup();
 }

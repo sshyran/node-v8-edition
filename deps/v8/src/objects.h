@@ -16,11 +16,8 @@
 #include "src/elements-kind.h"
 #include "src/field-index.h"
 #include "src/flags.h"
-#include "src/interpreter/bytecode-register.h"
 #include "src/messages.h"
 #include "src/property-details.h"
-#include "src/unicode-decoder.h"
-#include "src/unicode.h"
 
 #if V8_TARGET_ARCH_ARM
 #include "src/arm/constants-arm.h"  // NOLINT
@@ -1462,7 +1459,7 @@ class Object {
 
   // Returns the permanent hash code associated with this object. May return
   // undefined if not yet created.
-  Object* GetHash();
+  inline Object* GetHash();
 
   // Returns the permanent hash code associated with this object depending on
   // the actual object type. May create and store a hash code if needed and none
@@ -1542,6 +1539,15 @@ class Object {
 
   // Return the map of the root of object's prototype chain.
   Map* GetPrototypeChainRootMap(Isolate* isolate) const;
+
+  // Returns a non-SMI for JSReceivers, but returns the hash code for
+  // simple objects.  This avoids a double lookup in the cases where
+  // we know we will add the hash to the JSReceiver if it does not
+  // already exist.
+  //
+  // Despite its size, this needs to be inlined for performance
+  // reasons.
+  static inline Object* GetSimpleHash(Object* object);
 
   // Helper for SetProperty and SetSuperProperty.
   // Return value is only meaningful if [found] is set to true on return.
@@ -1645,9 +1651,8 @@ class Smi: public Object {
   DECL_VERIFIER(Smi)
 
   static constexpr Smi* const kZero = nullptr;
-  static const int kMinValue =
-      (static_cast<unsigned int>(-1)) << (kSmiValueSize - 1);
-  static const int kMaxValue = -(kMinValue + 1);
+  static const int kMinValue = kSmiMinValue;
+  static const int kMaxValue = kSmiMaxValue;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(Smi);
@@ -2290,6 +2295,8 @@ class JSObject: public JSReceiver {
   inline bool HasSmiOrObjectElements();
   // Returns true if an object has any of the "fast" elements kinds.
   inline bool HasFastElements();
+  // Returns true if an object has any of the PACKED elements kinds.
+  inline bool HasFastPackedElements();
   // Returns true if an object has elements of PACKED_DOUBLE_ELEMENTS or
   // HOLEY_DOUBLE_ELEMENTS ElementsKind.
   inline bool HasDoubleElements();
@@ -3234,6 +3241,7 @@ class JSGeneratorObject: public JSObject {
   DECL_CAST(JSGeneratorObject)
 
   // Dispatched behavior.
+  DECL_PRINTER(JSGeneratorObject)
   DECL_VERIFIER(JSGeneratorObject)
 
   // Magic sentinel values for the continuation.

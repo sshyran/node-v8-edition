@@ -88,10 +88,11 @@ class V8_EXPORT_PRIVATE Factory {
  public:
   Handle<Oddball> NewOddball(Handle<Map> map, const char* to_string,
                              Handle<Object> to_number, const char* type_of,
-                             byte kind);
+                             byte kind,
+                             PretenureFlag pretenure = TENURED_READ_ONLY);
 
   // Marks self references within code generation.
-  Handle<Oddball> NewSelfReferenceMarker();
+  Handle<Oddball> NewSelfReferenceMarker(PretenureFlag pretenure = TENURED);
 
   // Allocates a fixed array-like object with given map and initialized with
   // undefined values.
@@ -158,7 +159,8 @@ class V8_EXPORT_PRIVATE Factory {
       int size, PretenureFlag pretenure = NOT_TENURED);
 
   // Allocates a FeedbackMedata object and zeroes the data section.
-  Handle<FeedbackMetadata> NewFeedbackMetadata(int slot_count);
+  Handle<FeedbackMetadata> NewFeedbackMetadata(int slot_count,
+                                               PretenureFlag tenure = TENURED);
 
   Handle<FrameArray> NewFrameArray(int number_of_frames,
                                    PretenureFlag pretenure = NOT_TENURED);
@@ -346,9 +348,9 @@ class V8_EXPORT_PRIVATE Factory {
   Handle<ExternalOneByteString> NewNativeSourceString(
       const ExternalOneByteString::Resource* resource);
 
-  // Create a symbol in old space.
-  Handle<Symbol> NewSymbol();
-  Handle<Symbol> NewPrivateSymbol();
+  // Create a symbol in old or read-only space.
+  Handle<Symbol> NewSymbol(PretenureFlag pretenure = TENURED);
+  Handle<Symbol> NewPrivateSymbol(PretenureFlag pretenure = TENURED);
   Handle<Symbol> NewPrivateFieldSymbol();
 
   // Create a global (but otherwise uninitialized) context.
@@ -397,7 +399,8 @@ class V8_EXPORT_PRIVATE Factory {
 
   Handle<AccessorInfo> NewAccessorInfo();
 
-  Handle<Script> NewScript(Handle<String> source);
+  Handle<Script> NewScript(Handle<String> source,
+                           PretenureFlag tenure = TENURED);
 
   Handle<BreakPointInfo> NewBreakPointInfo(int source_position);
   Handle<BreakPoint> NewBreakPoint(int id, Handle<String> condition);
@@ -437,7 +440,8 @@ class V8_EXPORT_PRIVATE Factory {
 
   Handle<Cell> NewCell(Handle<Object> value);
 
-  Handle<PropertyCell> NewPropertyCell(Handle<Name> name);
+  Handle<PropertyCell> NewPropertyCell(Handle<Name> name,
+                                       PretenureFlag pretenure = TENURED);
 
   Handle<WeakCell> NewWeakCell(Handle<HeapObject> value,
                                PretenureFlag pretenure = TENURED);
@@ -730,6 +734,20 @@ class V8_EXPORT_PRIVATE Factory {
                        bool is_turbofanned = false, int stack_slots = 0,
                        int safepoint_table_offset = 0,
                        int handler_table_offset = 0);
+
+  // Like NewCode, this function allocates a new code object (fully
+  // initialized). It may return an empty handle if the allocation does not
+  // succeed.
+  V8_WARN_UNUSED_RESULT MaybeHandle<Code> TryNewCode(
+      const CodeDesc& desc, Code::Kind kind, Handle<Object> self_reference,
+      int32_t builtin_index = Builtins::kNoBuiltinId,
+      MaybeHandle<ByteArray> maybe_source_position_table =
+          MaybeHandle<ByteArray>(),
+      MaybeHandle<DeoptimizationData> maybe_deopt_data =
+          MaybeHandle<DeoptimizationData>(),
+      Movability movability = kMovable, uint32_t stub_key = 0,
+      bool is_turbofanned = false, int stack_slots = 0,
+      int safepoint_table_offset = 0, int handler_table_offset = 0);
 
   // Allocates a new, empty code object for use by builtin deserialization. The
   // given {size} argument specifies the size of the entire code object.

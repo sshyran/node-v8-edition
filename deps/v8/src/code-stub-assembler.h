@@ -236,7 +236,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                                       ParameterMode mode);
 
   // Round the 32bits payload of the provided word up to the next power of two.
-  Node* IntPtrRoundUpToPowerOfTwo32(Node* value);
+  TNode<IntPtrT> IntPtrRoundUpToPowerOfTwo32(TNode<IntPtrT> value);
   // Select the maximum of the two provided IntPtr values.
   TNode<IntPtrT> IntPtrMax(SloppyTNode<IntPtrT> left,
                            SloppyTNode<IntPtrT> right);
@@ -285,11 +285,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   SMI_ARITHMETIC_BINOP(SmiOr, WordOr)
 #undef SMI_ARITHMETIC_BINOP
 
-  Node* SmiShl(Node* a, int shift) {
+  TNode<Smi> TrySmiAdd(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
+  TNode<Smi> TrySmiSub(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
+
+  TNode<Smi> SmiShl(SloppyTNode<Smi> a, int shift) {
     return BitcastWordToTaggedSigned(WordShl(BitcastTaggedToWord(a), shift));
   }
 
-  Node* SmiShr(Node* a, int shift) {
+  TNode<Smi> SmiShr(SloppyTNode<Smi> a, int shift) {
     return BitcastWordToTaggedSigned(
         WordAnd(WordShr(BitcastTaggedToWord(a), shift),
                 BitcastTaggedToWord(SmiConstant(-1))));
@@ -692,7 +695,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   TNode<MaybeObject> MakeWeak(TNode<HeapObject> value);
 
-  // Load an array element from a FixedArray / WeakFixedArray.
+  // Load an array element from a FixedArray / WeakFixedArray / PropertyArray.
   TNode<MaybeObject> LoadArrayElement(
       SloppyTNode<HeapObject> object, int array_header_size, Node* index,
       int additional_offset = 0,
@@ -731,6 +734,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                                       TNode<Smi> index) {
     return LoadFixedArrayElement(object, index, 0, SMI_PARAMETERS);
   }
+
+  TNode<Object> LoadPropertyArrayElement(SloppyTNode<PropertyArray> object,
+                                         SloppyTNode<IntPtrT> index);
 
   // Load an array element from a FixedArray / WeakFixedArray, untag it and
   // return it as Word32.
@@ -988,10 +994,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                               TNode<String> left, TNode<String> right,
                               AllocationFlags flags = kNone);
 
-  Node* AllocateNameDictionary(int at_least_space_for);
-  Node* AllocateNameDictionary(Node* at_least_space_for);
-  Node* AllocateNameDictionaryWithCapacity(Node* capacity);
-  Node* CopyNameDictionary(Node* dictionary, Label* large_object_fallback);
+  TNode<NameDictionary> AllocateNameDictionary(int at_least_space_for);
+  TNode<NameDictionary> AllocateNameDictionary(
+      TNode<IntPtrT> at_least_space_for);
+  TNode<NameDictionary> AllocateNameDictionaryWithCapacity(
+      TNode<IntPtrT> capacity);
+  TNode<NameDictionary> CopyNameDictionary(TNode<NameDictionary> dictionary,
+                                           Label* large_object_fallback);
 
   template <typename CollectionType>
   Node* AllocateOrderedHashTable();
@@ -1442,6 +1451,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   TNode<BoolT> IsCustomElementsReceiverInstanceType(
       TNode<Int32T> instance_type);
   TNode<BoolT> IsSpecialReceiverMap(SloppyTNode<Map> map);
+  // Returns true if the map corresponds to non-special fast or dictionary
+  // object.
+  TNode<BoolT> IsSimpleObjectMap(TNode<Map> map);
   TNode<BoolT> IsStringInstanceType(SloppyTNode<Int32T> instance_type);
   TNode<BoolT> IsString(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsSymbolInstanceType(SloppyTNode<Int32T> instance_type);
@@ -1480,6 +1492,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   // ElementsKind helpers:
   Node* IsFastElementsKind(Node* elements_kind);
+  bool IsFastElementsKind(ElementsKind kind) {
+    return v8::internal::IsFastElementsKind(kind);
+  }
   Node* IsFastSmiOrTaggedElementsKind(Node* elements_kind);
   Node* IsFastSmiElementsKind(Node* elements_kind);
   Node* IsHoleyFastElementsKind(Node* elements_kind);
@@ -1663,18 +1678,18 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   // Returns true if any of the |T|'s bits in given |word| are set.
   template <typename T>
-  Node* IsSetWord(Node* word) {
+  TNode<BoolT> IsSetWord(SloppyTNode<WordT> word) {
     return IsSetWord(word, T::kMask);
   }
 
   // Returns true if any of the mask's bits in given |word| are set.
-  Node* IsSetWord(Node* word, uint32_t mask) {
+  TNode<BoolT> IsSetWord(SloppyTNode<WordT> word, uint32_t mask) {
     return WordNotEqual(WordAnd(word, IntPtrConstant(mask)), IntPtrConstant(0));
   }
 
   // Returns true if any of the mask's bit are set in the given Smi.
   // Smi-encoding of the mask is performed implicitly!
-  Node* IsSetSmi(Node* smi, int untagged_mask) {
+  TNode<BoolT> IsSetSmi(SloppyTNode<Smi> smi, int untagged_mask) {
     intptr_t mask_word = bit_cast<intptr_t>(Smi::FromInt(untagged_mask));
     return WordNotEqual(
         WordAnd(BitcastTaggedToWord(smi), IntPtrConstant(mask_word)),
@@ -1683,24 +1698,24 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   // Returns true if all of the |T|'s bits in given |word32| are clear.
   template <typename T>
-  Node* IsClearWord32(Node* word32) {
+  TNode<BoolT> IsClearWord32(SloppyTNode<Word32T> word32) {
     return IsClearWord32(word32, T::kMask);
   }
 
   // Returns true if all of the mask's bits in given |word32| are clear.
-  Node* IsClearWord32(Node* word32, uint32_t mask) {
+  TNode<BoolT> IsClearWord32(SloppyTNode<Word32T> word32, uint32_t mask) {
     return Word32Equal(Word32And(word32, Int32Constant(mask)),
                        Int32Constant(0));
   }
 
   // Returns true if all of the |T|'s bits in given |word| are clear.
   template <typename T>
-  Node* IsClearWord(Node* word) {
+  TNode<BoolT> IsClearWord(SloppyTNode<WordT> word) {
     return IsClearWord(word, T::kMask);
   }
 
   // Returns true if all of the mask's bits in given |word| are clear.
-  Node* IsClearWord(Node* word, uint32_t mask) {
+  TNode<BoolT> IsClearWord(SloppyTNode<WordT> word, uint32_t mask) {
     return WordEqual(WordAnd(word, IntPtrConstant(mask)), IntPtrConstant(0));
   }
 
@@ -1743,9 +1758,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   // Calculates array index for given dictionary entry and entry field.
   // See Dictionary::EntryToIndex().
   template <typename Dictionary>
-  Node* EntryToIndex(Node* entry, int field_index);
+  TNode<IntPtrT> EntryToIndex(TNode<IntPtrT> entry, int field_index);
   template <typename Dictionary>
-  Node* EntryToIndex(Node* entry) {
+  TNode<IntPtrT> EntryToIndex(TNode<IntPtrT> entry) {
     return EntryToIndex<Dictionary>(entry, Dictionary::kEntryKeyIndex);
   }
 
@@ -1795,44 +1810,52 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   }
 
   // Calculate a valid size for the a hash table.
-  TNode<IntPtrT> HashTableComputeCapacity(
-      SloppyTNode<IntPtrT> at_least_space_for);
+  TNode<IntPtrT> HashTableComputeCapacity(TNode<IntPtrT> at_least_space_for);
 
   template <class Dictionary>
-  Node* GetNumberOfElements(Node* dictionary) {
-    return LoadFixedArrayElement(dictionary,
-                                 Dictionary::kNumberOfElementsIndex);
+  TNode<Smi> GetNumberOfElements(TNode<Dictionary> dictionary) {
+    return CAST(
+        LoadFixedArrayElement(dictionary, Dictionary::kNumberOfElementsIndex));
   }
 
   template <class Dictionary>
-  void SetNumberOfElements(Node* dictionary, Node* num_elements_smi) {
+  void SetNumberOfElements(TNode<Dictionary> dictionary,
+                           TNode<Smi> num_elements_smi) {
     StoreFixedArrayElement(dictionary, Dictionary::kNumberOfElementsIndex,
                            num_elements_smi, SKIP_WRITE_BARRIER);
   }
 
   template <class Dictionary>
-  Node* GetNumberOfDeletedElements(Node* dictionary) {
-    return LoadFixedArrayElement(dictionary,
-                                 Dictionary::kNumberOfDeletedElementsIndex);
+  TNode<Smi> GetNumberOfDeletedElements(TNode<Dictionary> dictionary) {
+    return CAST(LoadFixedArrayElement(
+        dictionary, Dictionary::kNumberOfDeletedElementsIndex));
   }
 
   template <class Dictionary>
-  void SetNumberOfDeletedElements(Node* dictionary, Node* num_deleted_smi) {
+  void SetNumberOfDeletedElements(TNode<Dictionary> dictionary,
+                                  TNode<Smi> num_deleted_smi) {
     StoreFixedArrayElement(dictionary,
                            Dictionary::kNumberOfDeletedElementsIndex,
                            num_deleted_smi, SKIP_WRITE_BARRIER);
   }
 
   template <class Dictionary>
-  Node* GetCapacity(Node* dictionary) {
-    return LoadFixedArrayElement(dictionary, Dictionary::kCapacityIndex);
+  TNode<Smi> GetCapacity(TNode<Dictionary> dictionary) {
+    return CAST(LoadFixedArrayElement(dictionary, Dictionary::kCapacityIndex));
   }
 
   template <class Dictionary>
-  Node* GetNextEnumerationIndex(Node* dictionary);
+  TNode<Smi> GetNextEnumerationIndex(TNode<Dictionary> dictionary) {
+    return CAST(LoadFixedArrayElement(dictionary,
+                                      Dictionary::kNextEnumerationIndexIndex));
+  }
 
   template <class Dictionary>
-  void SetNextEnumerationIndex(Node* dictionary, Node* next_enum_index_smi);
+  void SetNextEnumerationIndex(TNode<Dictionary> dictionary,
+                               TNode<Smi> next_enum_index_smi) {
+    StoreFixedArrayElement(dictionary, Dictionary::kNextEnumerationIndexIndex,
+                           next_enum_index_smi, SKIP_WRITE_BARRIER);
+  }
 
   // Looks up an entry in a NameDictionaryBase successor. If the entry is found
   // control goes to {if_found} and {var_name_index} contains an index of the
@@ -1842,11 +1865,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   enum LookupMode { kFindExisting, kFindInsertionIndex };
 
   template <typename Dictionary>
-  Node* LoadName(Node* key);
+  TNode<HeapObject> LoadName(TNode<HeapObject> key);
 
   template <typename Dictionary>
-  void NameDictionaryLookup(Node* dictionary, Node* unique_name,
-                            Label* if_found, Variable* var_name_index,
+  void NameDictionaryLookup(TNode<Dictionary> dictionary,
+                            TNode<Name> unique_name, Label* if_found,
+                            TVariable<IntPtrT>* var_name_index,
                             Label* if_not_found,
                             int inlined_probes = kInlinedDictionaryProbes,
                             LookupMode mode = kFindExisting);
@@ -1854,19 +1878,23 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   Node* ComputeIntegerHash(Node* key);
   Node* ComputeIntegerHash(Node* key, Node* seed);
 
-  void NumberDictionaryLookup(Node* dictionary, Node* intptr_index,
-                              Label* if_found, Variable* var_entry,
+  void NumberDictionaryLookup(TNode<NumberDictionary> dictionary,
+                              TNode<IntPtrT> intptr_index, Label* if_found,
+                              TVariable<IntPtrT>* var_entry,
                               Label* if_not_found);
 
   template <class Dictionary>
-  void FindInsertionEntry(Node* dictionary, Node* key, Variable* var_key_index);
+  void FindInsertionEntry(TNode<Dictionary> dictionary, TNode<Name> key,
+                          TVariable<IntPtrT>* var_key_index);
 
   template <class Dictionary>
-  void InsertEntry(Node* dictionary, Node* key, Node* value, Node* index,
-                   Node* enum_index);
+  void InsertEntry(TNode<Dictionary> dictionary, TNode<Name> key,
+                   TNode<Object> value, TNode<IntPtrT> index,
+                   TNode<Smi> enum_index);
 
   template <class Dictionary>
-  void Add(Node* dictionary, Node* key, Node* value, Label* bailout);
+  void Add(TNode<Dictionary> dictionary, TNode<Name> key, TNode<Object> value,
+           Label* bailout);
 
   // Tries to check if {object} has own {unique_name} property.
   void TryHasOwnProperty(Node* object, Node* map, Node* instance_type,
@@ -1974,8 +2002,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   // if_absent if it's known to not exist. To if_not_found if the prototype
   // chain needs to be checked. And if_bailout if the lookup is unsupported.
   void TryLookupElement(Node* object, Node* map,
-                        SloppyTNode<Int32T> instance_type, Node* intptr_index,
-                        Label* if_found, Label* if_absent, Label* if_not_found,
+                        SloppyTNode<Int32T> instance_type,
+                        SloppyTNode<IntPtrT> intptr_index, Label* if_found,
+                        Label* if_absent, Label* if_not_found,
                         Label* if_bailout);
 
   // This is a type of a lookup in holder generator function. In case of a
@@ -2111,7 +2140,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                                        Node* value);
 
   // Create a new AllocationSite and install it into a feedback vector.
-  Node* CreateAllocationSiteInFeedbackVector(Node* feedback_vector, Node* slot);
+  TNode<AllocationSite> CreateAllocationSiteInFeedbackVector(
+      Node* feedback_vector, Node* slot);
 
   enum class IndexAdvanceMode { kPre, kPost };
 
@@ -2312,6 +2342,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
     CallRuntime(Runtime::kAbort, NoContextConstant(), SmiConstant(reason));
     Unreachable();
   }
+
+  bool ConstexprBoolNot(bool value) { return !value; }
 
   void PerformStackCheck(Node* context);
 

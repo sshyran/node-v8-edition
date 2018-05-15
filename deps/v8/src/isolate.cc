@@ -57,7 +57,6 @@
 #include "src/version.h"
 #include "src/visitors.h"
 #include "src/vm-state-inl.h"
-#include "src/wasm/compilation-manager.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-objects.h"
@@ -471,7 +470,7 @@ class FrameArrayBuilder {
         }
         Handle<WasmInstanceObject> instance = summary.wasm_instance();
         int flags = 0;
-        if (instance->compiled_module()->shared()->is_asm_js()) {
+        if (instance->module_object()->shared()->is_asm_js()) {
           flags |= FrameArray::kIsAsmJsWasmFrame;
           if (WasmCompiledFrame::cast(frame)->at_to_number_conversion()) {
             flags |= FrameArray::kAsmJsAtNumberConversion;
@@ -490,7 +489,7 @@ class FrameArrayBuilder {
         const auto& summary = summ.AsWasmInterpreted();
         Handle<WasmInstanceObject> instance = summary.wasm_instance();
         int flags = FrameArray::kIsWasmInterpretedFrame;
-        DCHECK(!instance->compiled_module()->shared()->is_asm_js());
+        DCHECK(!instance->module_object()->shared()->is_asm_js());
         elements_ = FrameArray::AppendWasmFrame(elements_, instance,
                                                 summary.function_index(), {},
                                                 summary.byte_offset(), flags);
@@ -808,7 +807,7 @@ class CaptureStackTraceHelper {
     Handle<StackFrameInfo> info = factory()->NewStackFrameInfo();
 
     Handle<WasmSharedModuleData> shared(
-        summ.wasm_instance()->compiled_module()->shared(), isolate_);
+        summ.wasm_instance()->module_object()->shared(), isolate_);
     Handle<String> name = WasmSharedModuleData::GetFunctionName(
         isolate_, shared, summ.function_index());
     info->set_function_name(*name);
@@ -1739,8 +1738,7 @@ bool Isolate::ComputeLocationFromStackTrace(MessageLocation* target,
   const int frame_count = elements->FrameCount();
   for (int i = 0; i < frame_count; i++) {
     if (elements->IsWasmFrame(i) || elements->IsAsmJsWasmFrame(i)) {
-      Handle<WasmCompiledModule> compiled_module(
-          elements->WasmInstance(i)->compiled_module());
+      Handle<WasmInstanceObject> instance(elements->WasmInstance(i));
       uint32_t func_index =
           static_cast<uint32_t>(elements->WasmFunctionIndex(i)->value());
       int code_offset = elements->Offset(i)->value();
@@ -1749,16 +1747,16 @@ bool Isolate::ComputeLocationFromStackTrace(MessageLocation* target,
       // a second lookup here could lead to inconsistency.
       int byte_offset =
           FrameSummary::WasmCompiledFrameSummary::GetWasmSourcePosition(
-              compiled_module->GetNativeModule()->code(func_index),
+              instance->compiled_module()->GetNativeModule()->code(func_index),
               code_offset);
 
       bool is_at_number_conversion =
           elements->IsAsmJsWasmFrame(i) &&
           elements->Flags(i)->value() & FrameArray::kAsmJsAtNumberConversion;
       int pos = WasmSharedModuleData::GetSourcePosition(
-          handle(compiled_module->shared(), this), func_index, byte_offset,
-          is_at_number_conversion);
-      Handle<Script> script(compiled_module->shared()->script());
+          handle(instance->module_object()->shared(), this), func_index,
+          byte_offset, is_at_number_conversion);
+      Handle<Script> script(instance->module_object()->shared()->script());
 
       *target = MessageLocation(script, pos, pos + 1);
       return true;
@@ -2060,7 +2058,6 @@ void Isolate::PopPromise() {
 }
 
 namespace {
-
 bool InternalPromiseHasUserDefinedRejectHandler(Isolate* isolate,
                                                 Handle<JSPromise> promise);
 
@@ -2107,27 +2104,29 @@ bool InternalPromiseHasUserDefinedRejectHandler(Isolate* isolate,
   }
 
   if (promise->status() == Promise::kPending) {
-    Handle<Object> current(promise->reactions(), isolate);
-    while (!current->IsSmi()) {
-      Handle<PromiseReaction> current_reaction =
-          Handle<PromiseReaction>::cast(current);
-      Handle<HeapObject> payload(current_reaction->payload(), isolate);
-      Handle<JSPromise> current_promise;
-      if (JSPromise::From(payload).ToHandle(&current_promise)) {
-        if (current_reaction->reject_handler()->IsCallable()) {
-          Handle<JSReceiver> current_handler(
-              JSReceiver::cast(current_reaction->reject_handler()), isolate);
-          if (PromiseHandlerCheck(isolate, current_handler, current_promise)) {
-            return true;
-          }
-        } else {
-          if (InternalPromiseHasUserDefinedRejectHandler(isolate,
-                                                         current_promise)) {
-            return true;
-          }
+    for (Handle<Object> current(promise->reactions(), isolate);
+         !current->IsSmi();) {
+      Handle<PromiseReaction> reaction = Handle<PromiseReaction>::cast(current);
+      Handle<HeapObject> promise_or_capability(
+          reaction->promise_or_capability(), isolate);
+      Handle<JSPromise> promise = Handle<JSPromise>::cast(
+          promise_or_capability->IsJSPromise()
+              ? promise_or_capability
+              : handle(Handle<PromiseCapability>::cast(promise_or_capability)
+                           ->promise(),
+                       isolate));
+      if (reaction->reject_handler()->IsUndefined(isolate)) {
+        if (InternalPromiseHasUserDefinedRejectHandler(isolate, promise)) {
+          return true;
+        }
+      } else {
+        Handle<JSReceiver> current_handler(
+            JSReceiver::cast(reaction->reject_handler()), isolate);
+        if (PromiseHandlerCheck(isolate, current_handler, promise)) {
+          return true;
         }
       }
-      current = handle(current_reaction->next(), isolate);
+      current = handle(reaction->next(), isolate);
     }
   }
 
@@ -2970,7 +2969,6 @@ bool Isolate::Init(StartupDeserializer* des) {
   date_cache_ = new DateCache();
   call_descriptor_data_ =
       new CallInterfaceDescriptorData[CallDescriptors::NUMBER_OF_DESCRIPTORS];
-  cpu_profiler_ = new CpuProfiler(this);
   heap_profiler_ = new HeapProfiler(heap());
   interpreter_ = new interpreter::Interpreter(this);
   compiler_dispatcher_ =
@@ -4064,6 +4062,13 @@ void Isolate::SetIdle(bool is_idle) {
   } else if (state == IDLE) {
     set_current_vm_state(EXTERNAL);
   }
+}
+
+CpuProfiler* Isolate::EnsureCpuProfiler() {
+  if (!cpu_profiler_) {
+    cpu_profiler_ = new CpuProfiler(this);
+  }
+  return cpu_profiler_;
 }
 
 bool StackLimitCheck::JsHasOverflowed(uintptr_t gap) const {

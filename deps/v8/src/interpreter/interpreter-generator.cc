@@ -1322,17 +1322,13 @@ class IncDecAssembler : public UnaryNumericOpAssembler {
 
   Node* SmiOp(Node* smi_value, Variable* var_feedback, Label* do_float_op,
               Variable* var_float) override {
-    // Try fast Smi operation first.
-    Node* value = BitcastTaggedToWord(smi_value);
-    Node* one = BitcastTaggedToWord(SmiConstant(1));
-    Node* pair = op() == Operation::kIncrement
-                     ? IntPtrAddWithOverflow(value, one)
-                     : IntPtrSubWithOverflow(value, one);
-    Node* overflow = Projection(1, pair);
-
-    // Check if the Smi operation overflowed.
+    TNode<Smi> value = CAST(smi_value);
+    TNode<Smi> one = SmiConstant(1);
     Label if_overflow(this), if_notoverflow(this);
-    Branch(overflow, &if_overflow, &if_notoverflow);
+    TNode<Smi> result = op() == Operation::kIncrement
+                            ? TrySmiAdd(value, one, &if_overflow)
+                            : TrySmiSub(value, one, &if_overflow);
+    Goto(&if_notoverflow);
 
     BIND(&if_overflow);
     {
@@ -1342,7 +1338,7 @@ class IncDecAssembler : public UnaryNumericOpAssembler {
 
     BIND(&if_notoverflow);
     CombineFeedback(var_feedback, BinaryOperationFeedback::kSignedSmall);
-    return BitcastWordToTaggedSigned(Projection(0, pair));
+    return result;
   }
 
   Node* FloatOp(Node* float_value) override {
@@ -2447,8 +2443,8 @@ IGNITION_HANDLER(CreateEmptyObjectLiteral, InterpreterAssembler) {
 IGNITION_HANDLER(GetTemplateObject, InterpreterAssembler) {
   Node* feedback_vector = LoadFeedbackVector();
   Node* slot = BytecodeOperandIdx(1);
-  Node* cached_value =
-      LoadFeedbackVectorSlot(feedback_vector, slot, 0, INTPTR_PARAMETERS);
+  TNode<Object> cached_value = ToObject(
+      LoadFeedbackVectorSlot(feedback_vector, slot, 0, INTPTR_PARAMETERS));
 
   Label call_runtime(this, Label::kDeferred);
   GotoIf(WordEqual(cached_value, SmiConstant(0)), &call_runtime);
@@ -2478,7 +2474,8 @@ IGNITION_HANDLER(CreateClosure, InterpreterAssembler) {
   Node* context = GetContext();
   Node* slot = BytecodeOperandIdx(1);
   Node* feedback_vector = LoadFeedbackVector();
-  Node* feedback_cell = LoadFeedbackVectorSlot(feedback_vector, slot);
+  TNode<Object> feedback_cell =
+      ToObject(LoadFeedbackVectorSlot(feedback_vector, slot));
 
   Label if_fast(this), if_slow(this, Label::kDeferred);
   Branch(IsSetWord32<CreateClosureFlags::FastNewClosureBit>(flags), &if_fast,

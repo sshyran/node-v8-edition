@@ -2253,60 +2253,6 @@ Map* Map::GetPrototypeChainRootMap(Isolate* isolate) const {
   return isolate->heap()->null_value()->map();
 }
 
-namespace {
-
-// Returns a non-SMI for JSReceivers, but returns the hash code for simple
-// objects.  This avoids a double lookup in the cases where we know we will
-// add the hash to the JSReceiver if it does not already exist.
-Object* GetSimpleHash(Object* object) {
-  DisallowHeapAllocation no_gc;
-  if (object->IsSmi()) {
-    uint32_t hash = ComputeIntegerHash(Smi::ToInt(object));
-    return Smi::FromInt(hash & Smi::kMaxValue);
-  }
-  if (object->IsHeapNumber()) {
-    double num = HeapNumber::cast(object)->value();
-    if (std::isnan(num)) return Smi::FromInt(Smi::kMaxValue);
-    // Use ComputeIntegerHash for all values in Signed32 range, including -0,
-    // which is considered equal to 0 because collections use SameValueZero.
-    uint32_t hash;
-    // Check range before conversion to avoid undefined behavior.
-    if (num >= kMinInt && num <= kMaxInt && FastI2D(FastD2I(num)) == num) {
-      hash = ComputeIntegerHash(FastD2I(num));
-    } else {
-      hash = ComputeLongHash(double_to_uint64(num));
-    }
-    return Smi::FromInt(hash & Smi::kMaxValue);
-  }
-  if (object->IsName()) {
-    uint32_t hash = Name::cast(object)->Hash();
-    return Smi::FromInt(hash);
-  }
-  if (object->IsOddball()) {
-    uint32_t hash = Oddball::cast(object)->to_string()->Hash();
-    return Smi::FromInt(hash);
-  }
-  if (object->IsBigInt()) {
-    uint32_t hash = BigInt::cast(object)->Hash();
-    return Smi::FromInt(hash & Smi::kMaxValue);
-  }
-  DCHECK(object->IsJSReceiver());
-  return object;
-}
-
-}  // namespace
-
-Object* Object::GetHash() {
-  DisallowHeapAllocation no_gc;
-  Object* hash = GetSimpleHash(this);
-  if (hash->IsSmi()) return hash;
-
-  DCHECK(IsJSReceiver());
-  JSReceiver* receiver = JSReceiver::cast(this);
-  Isolate* isolate = receiver->GetIsolate();
-  return receiver->GetIdentityHash(isolate);
-}
-
 // static
 Smi* Object::GetOrCreateHash(Isolate* isolate, Object* key) {
   DisallowHeapAllocation no_gc;
@@ -2315,7 +2261,7 @@ Smi* Object::GetOrCreateHash(Isolate* isolate, Object* key) {
 
 Smi* Object::GetOrCreateHash(Isolate* isolate) {
   DisallowHeapAllocation no_gc;
-  Object* hash = GetSimpleHash(this);
+  Object* hash = Object::GetSimpleHash(this);
   if (hash->IsSmi()) return Smi::cast(hash);
 
   DCHECK(IsJSReceiver());
@@ -2601,6 +2547,7 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   // Abort if size does not allow in-place conversion.
   if (size < ExternalString::kShortSize) return false;
   Heap* heap = GetHeap();
+  if (heap->read_only_space()->Contains(this)) return false;
   bool is_one_byte = this->IsOneByteRepresentation();
   bool is_internalized = this->IsInternalizedString();
   bool has_pointers = StringShape(this).IsIndirect();
@@ -16118,27 +16065,6 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
 }
 
 // static
-MaybeHandle<JSPromise> JSPromise::From(Handle<HeapObject> object) {
-  Isolate* const isolate = object->GetIsolate();
-  if (object->IsJSPromise()) {
-    return Handle<JSPromise>::cast(object);
-  } else if (object->IsPromiseCapability()) {
-    Handle<PromiseCapability> capability =
-        Handle<PromiseCapability>::cast(object);
-    if (capability->promise()->IsJSPromise()) {
-      return handle(JSPromise::cast(capability->promise()), isolate);
-    }
-  } else if (object->IsJSGeneratorObject()) {
-    Handle<JSGeneratorObject> generator =
-        Handle<JSGeneratorObject>::cast(object);
-    Handle<Object> handled_by = JSObject::GetDataProperty(
-        generator, isolate->factory()->generator_outer_promise_symbol());
-    if (handled_by->IsJSPromise()) return Handle<JSPromise>::cast(handled_by);
-  }
-  return MaybeHandle<JSPromise>();
-}
-
-// static
 Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
                                                   Handle<Object> reactions,
                                                   Handle<Object> argument,
@@ -16177,8 +16103,8 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
           *isolate->native_context());
       STATIC_ASSERT(PromiseReaction::kFulfillHandlerOffset ==
                     PromiseFulfillReactionJobTask::kHandlerOffset);
-      STATIC_ASSERT(PromiseReaction::kPayloadOffset ==
-                    PromiseFulfillReactionJobTask::kPayloadOffset);
+      STATIC_ASSERT(PromiseReaction::kPromiseOrCapabilityOffset ==
+                    PromiseFulfillReactionJobTask::kPromiseOrCapabilityOffset);
     } else {
       DisallowHeapAllocation no_gc;
       HeapObject* handler = reaction->reject_handler();
@@ -16188,8 +16114,8 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
       Handle<PromiseRejectReactionJobTask>::cast(task)->set_context(
           *isolate->native_context());
       Handle<PromiseRejectReactionJobTask>::cast(task)->set_handler(handler);
-      STATIC_ASSERT(PromiseReaction::kPayloadOffset ==
-                    PromiseRejectReactionJobTask::kPayloadOffset);
+      STATIC_ASSERT(PromiseReaction::kPromiseOrCapabilityOffset ==
+                    PromiseRejectReactionJobTask::kPromiseOrCapabilityOffset);
     }
 
     isolate->EnqueueMicrotask(Handle<PromiseReactionJobTask>::cast(task));

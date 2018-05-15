@@ -146,7 +146,10 @@ Object* PrepareElementsForSortGeneric(Handle<JSReceiver> receiver,
                                         isolate->factory()->undefined_value(),
                                         LanguageMode::kStrict));
   }
-  DCHECK_LE(current_pos, num_indices);
+  // TODO(szuend): Re-enable when we also copy from the prototype chain for
+  //               JSArrays. Then we can use HasOwnProperty instead of
+  //               HasElement and this condition will hold.
+  // DCHECK_LE(current_pos, num_indices);
 
   // Deleting everything after the undefineds up unto the limit.
   for (int i = num_indices - 1; i >= 0; --i) {
@@ -316,6 +319,20 @@ RUNTIME_FUNCTION(Runtime_RemoveArrayHoles) {
   if (isolate->debug_execution_mode() == DebugInfo::kSideEffects) {
     if (!isolate->debug()->PerformSideEffectCheckForObject(object)) {
       return isolate->heap()->exception();
+    }
+  }
+
+  // Counter for sorting arrays that have non-packed elements and where either
+  // the ElementsProtector is invalid or the prototype does not match
+  // Array.prototype.
+  if (object->IsJSArray() &&
+      !Handle<JSArray>::cast(object)->HasFastPackedElements()) {
+    JSObject* initial_array_proto = JSObject::cast(
+        isolate->native_context()->get(Context::INITIAL_ARRAY_PROTOTYPE_INDEX));
+    if (!isolate->IsNoElementsProtectorIntact() ||
+        object->map()->prototype() != initial_array_proto) {
+      isolate->CountUsage(
+          v8::Isolate::kArrayPrototypeSortJSArrayModifiedPrototype);
     }
   }
 

@@ -484,22 +484,23 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
   explicit DeletePropertyBaseAssembler(compiler::CodeAssemblerState* state)
       : AccessorAssembler(state) {}
 
-  void DeleteDictionaryProperty(Node* receiver, Node* properties, Node* name,
-                                Node* context, Label* dont_delete,
-                                Label* notfound) {
-    VARIABLE(var_name_index, MachineType::PointerRepresentation());
+  void DeleteDictionaryProperty(TNode<Object> receiver,
+                                TNode<NameDictionary> properties,
+                                TNode<Name> name, TNode<Context> context,
+                                Label* dont_delete, Label* notfound) {
+    TVARIABLE(IntPtrT, var_name_index);
     Label dictionary_found(this, &var_name_index);
     NameDictionaryLookup<NameDictionary>(properties, name, &dictionary_found,
                                          &var_name_index, notfound);
 
     BIND(&dictionary_found);
-    Node* key_index = var_name_index.value();
-    Node* details =
+    TNode<IntPtrT> key_index = var_name_index.value();
+    TNode<Uint32T> details =
         LoadDetailsByKeyIndex<NameDictionary>(properties, key_index);
     GotoIf(IsSetWord32(details, PropertyDetails::kAttributesDontDeleteMask),
            dont_delete);
     // Overwrite the entry itself (see NameDictionary::SetEntry).
-    Node* filler = TheHoleConstant();
+    TNode<HeapObject> filler = TheHoleConstant();
     DCHECK(Heap::RootIsImmortalImmovable(Heap::kTheHoleValueRootIndex));
     StoreFixedArrayElement(properties, key_index, filler, SKIP_WRITE_BARRIER);
     StoreValueByKeyIndex<NameDictionary>(properties, key_index, filler,
@@ -508,16 +509,17 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
                                            SmiConstant(0));
 
     // Update bookkeeping information (see NameDictionary::ElementRemoved).
-    Node* nof = GetNumberOfElements<NameDictionary>(properties);
-    Node* new_nof = SmiSub(nof, SmiConstant(1));
+    TNode<Smi> nof = GetNumberOfElements<NameDictionary>(properties);
+    TNode<Smi> new_nof = SmiSub(nof, SmiConstant(1));
     SetNumberOfElements<NameDictionary>(properties, new_nof);
-    Node* num_deleted = GetNumberOfDeletedElements<NameDictionary>(properties);
-    Node* new_deleted = SmiAdd(num_deleted, SmiConstant(1));
+    TNode<Smi> num_deleted =
+        GetNumberOfDeletedElements<NameDictionary>(properties);
+    TNode<Smi> new_deleted = SmiAdd(num_deleted, SmiConstant(1));
     SetNumberOfDeletedElements<NameDictionary>(properties, new_deleted);
 
     // Shrink the dictionary if necessary (see NameDictionary::Shrink).
     Label shrinking_done(this);
-    Node* capacity = GetCapacity<NameDictionary>(properties);
+    TNode<Smi> capacity = GetCapacity<NameDictionary>(properties);
     GotoIf(SmiGreaterThan(new_nof, SmiShr(capacity, 2)), &shrinking_done);
     GotoIf(SmiLessThan(new_nof, SmiConstant(16)), &shrinking_done);
     CallRuntime(Runtime::kShrinkPropertyDictionary, context, receiver);
@@ -529,10 +531,10 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
 };
 
 TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
-  Node* receiver = Parameter(Descriptor::kObject);
-  Node* key = Parameter(Descriptor::kKey);
-  Node* language_mode = Parameter(Descriptor::kLanguageMode);
-  Node* context = Parameter(Descriptor::kContext);
+  TNode<Object> receiver = CAST(Parameter(Descriptor::kObject));
+  TNode<Object> key = CAST(Parameter(Descriptor::kKey));
+  TNode<Smi> language_mode = CAST(Parameter(Descriptor::kLanguageMode));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
 
   VARIABLE(var_index, MachineType::PointerRepresentation());
   VARIABLE(var_unique, MachineRepresentation::kTagged, key);
@@ -540,7 +542,7 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
       if_notfound(this), slow(this);
 
   GotoIf(TaggedIsSmi(receiver), &slow);
-  Node* receiver_map = LoadMap(receiver);
+  TNode<Map> receiver_map = LoadMap(CAST(receiver));
   TNode<Int32T> instance_type = LoadMapInstanceType(receiver_map);
   GotoIf(IsCustomElementsReceiverInstanceType(instance_type), &slow);
   TryToName(key, &if_index, &var_index, &if_unique_name, &var_unique, &slow,
@@ -555,7 +557,7 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
   BIND(&if_unique_name);
   {
     Comment("key is unique name");
-    Node* unique = var_unique.value();
+    TNode<Name> unique = CAST(var_unique.value());
     CheckForAssociatedProtector(unique, &slow);
 
     Label dictionary(this), dont_delete(this);
@@ -569,7 +571,8 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
     {
       InvalidateValidityCellIfPrototype(receiver_map);
 
-      Node* properties = LoadSlowProperties(receiver);
+      TNode<NameDictionary> properties =
+          CAST(LoadSlowProperties(CAST(receiver)));
       DeleteDictionaryProperty(receiver, properties, unique, context,
                                &dont_delete, &if_notfound);
     }
@@ -666,7 +669,7 @@ class InternalBuiltinsAssembler : public CodeStubAssembler {
   void LeaveMicrotaskContext();
 
   void RunPromiseHook(Runtime::FunctionId id, TNode<Context> context,
-                      SloppyTNode<HeapObject> payload);
+                      SloppyTNode<HeapObject> promise_or_capability);
 
   TNode<Object> GetPendingException() {
     auto ref = ExternalReference::Create(kPendingExceptionAddress, isolate());
@@ -787,12 +790,20 @@ void InternalBuiltinsAssembler::LeaveMicrotaskContext() {
 
 void InternalBuiltinsAssembler::RunPromiseHook(
     Runtime::FunctionId id, TNode<Context> context,
-    SloppyTNode<HeapObject> payload) {
+    SloppyTNode<HeapObject> promise_or_capability) {
   Label hook(this, Label::kDeferred), done_hook(this);
   Branch(IsPromiseHookEnabledOrDebugIsActive(), &hook, &done_hook);
   BIND(&hook);
   {
-    CallRuntime(id, context, payload);
+    // Get to the underlying JSPromise instance.
+    Node* const promise = Select<HeapObject>(
+        IsJSPromise(promise_or_capability),
+        [=] { return promise_or_capability; },
+        [=] {
+          return CAST(LoadObjectField(promise_or_capability,
+                                      PromiseCapability::kPromiseOffset));
+        });
+    CallRuntime(id, context, promise);
     Goto(&done_hook);
   }
   BIND(&done_hook);
@@ -1005,19 +1016,21 @@ TF_BUILTIN(RunMicrotasks, InternalBuiltinsAssembler) {
             LoadObjectField(microtask, PromiseReactionJobTask::kArgumentOffset);
         Node* const handler =
             LoadObjectField(microtask, PromiseReactionJobTask::kHandlerOffset);
-        Node* const payload =
-            LoadObjectField(microtask, PromiseReactionJobTask::kPayloadOffset);
+        Node* const promise_or_capability = LoadObjectField(
+            microtask, PromiseReactionJobTask::kPromiseOrCapabilityOffset);
 
         // Run the promise before/debug hook if enabled.
-        RunPromiseHook(Runtime::kPromiseHookBefore, microtask_context, payload);
+        RunPromiseHook(Runtime::kPromiseHookBefore, microtask_context,
+                       promise_or_capability);
 
         Node* const result =
             CallBuiltin(Builtins::kPromiseFulfillReactionJob, microtask_context,
-                        argument, handler, payload);
+                        argument, handler, promise_or_capability);
         GotoIfException(result, &if_exception, &var_exception);
 
         // Run the promise after/debug hook if enabled.
-        RunPromiseHook(Runtime::kPromiseHookAfter, microtask_context, payload);
+        RunPromiseHook(Runtime::kPromiseHookAfter, microtask_context,
+                       promise_or_capability);
 
         LeaveMicrotaskContext();
         SetCurrentContext(current_context);
@@ -1038,19 +1051,21 @@ TF_BUILTIN(RunMicrotasks, InternalBuiltinsAssembler) {
             LoadObjectField(microtask, PromiseReactionJobTask::kArgumentOffset);
         Node* const handler =
             LoadObjectField(microtask, PromiseReactionJobTask::kHandlerOffset);
-        Node* const payload =
-            LoadObjectField(microtask, PromiseReactionJobTask::kPayloadOffset);
+        Node* const promise_or_capability = LoadObjectField(
+            microtask, PromiseReactionJobTask::kPromiseOrCapabilityOffset);
 
         // Run the promise before/debug hook if enabled.
-        RunPromiseHook(Runtime::kPromiseHookBefore, microtask_context, payload);
+        RunPromiseHook(Runtime::kPromiseHookBefore, microtask_context,
+                       promise_or_capability);
 
         Node* const result =
             CallBuiltin(Builtins::kPromiseRejectReactionJob, microtask_context,
-                        argument, handler, payload);
+                        argument, handler, promise_or_capability);
         GotoIfException(result, &if_exception, &var_exception);
 
         // Run the promise after/debug hook if enabled.
-        RunPromiseHook(Runtime::kPromiseHookAfter, microtask_context, payload);
+        RunPromiseHook(Runtime::kPromiseHookAfter, microtask_context,
+                       promise_or_capability);
 
         LeaveMicrotaskContext();
         SetCurrentContext(current_context);
