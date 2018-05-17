@@ -112,14 +112,41 @@ class ScopeChain {
     return e->Lookup(name);
   }
 
+  Declarable* LookupGlobalScope(const std::string& name) {
+    auto& e = current_scopes_.front();
+    return e->Lookup(name);
+  }
+
   void Print() {
     for (auto s : current_scopes_) {
       s->Print();
     }
   }
 
+  struct Snapshot {
+    ScopeChain* chain;
+    std::vector<Scope*> current_scopes;
+  };
+
+  Snapshot TaskSnapshot() { return {this, current_scopes_}; }
+
+  class ScopedSnapshotRestorer {
+   public:
+    explicit ScopedSnapshotRestorer(const Snapshot& snapshot)
+        : chain_(snapshot.chain) {
+      saved_ = chain_->current_scopes_;
+      chain_->current_scopes_ = snapshot.current_scopes;
+    }
+    ~ScopedSnapshotRestorer() { chain_->current_scopes_ = saved_; }
+
+   private:
+    ScopeChain* chain_;
+    std::vector<Scope*> saved_;
+  };
+
  private:
   friend class Scope;
+  friend class ScopedSnapshotRestorer;
 
   int GetNextScopeNumber() { return next_scope_number_++; }
 

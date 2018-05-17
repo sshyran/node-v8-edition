@@ -148,9 +148,7 @@ void IC::TraceIC(const char* type, Handle<Object> name, State old_state,
   ICStats::instance()->End();
 }
 
-
-IC::IC(FrameDepth depth, Isolate* isolate, Handle<FeedbackVector> vector,
-       FeedbackSlot slot)
+IC::IC(Isolate* isolate, Handle<FeedbackVector> vector, FeedbackSlot slot)
     : isolate_(isolate),
       vector_set_(false),
       kind_(FeedbackSlotKind::kInvalid),
@@ -169,21 +167,9 @@ IC::IC(FrameDepth depth, Isolate* isolate, Handle<FeedbackVector> vector,
   Address* pc_address =
       reinterpret_cast<Address*>(entry + ExitFrameConstants::kCallerPCOffset);
   Address fp = Memory::Address_at(entry + ExitFrameConstants::kCallerFPOffset);
-  // If there's another JavaScript frame on the stack we need to look one frame
-  // further down the stack to find the frame pointer and the return address
-  // stack slot.
-  if (depth == EXTRA_CALL_FRAME) {
-    if (FLAG_enable_embedded_constant_pool) {
-      constant_pool = reinterpret_cast<Address*>(
-          fp + StandardFrameConstants::kConstantPoolOffset);
-    }
-    const int kCallerPCOffset = StandardFrameConstants::kCallerPCOffset;
-    pc_address = reinterpret_cast<Address*>(fp + kCallerPCOffset);
-    fp = Memory::Address_at(fp + StandardFrameConstants::kCallerFPOffset);
-  }
 #ifdef DEBUG
   StackFrameIterator it(isolate);
-  for (int i = 0; i < depth + 1; i++) it.Advance();
+  for (int i = 0; i < 1; i++) it.Advance();
   StackFrame* frame = it.frame();
   DCHECK(fp == frame->fp() && pc_address == frame->pc_address());
 #endif
@@ -734,11 +720,16 @@ StubCache* IC::stub_cache() {
 void IC::UpdateMegamorphicCache(Handle<Map> map, Handle<Name> name,
                                 const MaybeObjectHandle& handler) {
   HeapObject* heap_object;
-  if (handler->ToWeakHeapObject(&heap_object) && heap_object->IsMap()) {
+  if (handler->ToWeakHeapObject(&heap_object)) {
     // TODO(marja): remove this conversion once megamorphic stub cache supports
     // weak handlers.
-    Handle<Object> weak_cell =
-        Map::WeakCellForMap(handle(Map::cast(heap_object)));
+    Handle<Object> weak_cell;
+    if (heap_object->IsMap()) {
+      weak_cell = Map::WeakCellForMap(handle(Map::cast(heap_object)));
+    } else {
+      weak_cell = isolate_->factory()->NewWeakCell(
+          handle(PropertyCell::cast(heap_object)));
+    }
     stub_cache()->Set(*name, *map, *weak_cell);
   } else {
     stub_cache()->Set(*name, *map, handler->ToObject());
@@ -1500,8 +1491,8 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
           DCHECK_EQ(*lookup->GetReceiver(), *holder);
           DCHECK_EQ(*store_target, *holder);
 #endif
-          return MaybeObjectHandle(
-              StoreHandler::StoreGlobal(isolate(), lookup->transition_cell()));
+          return StoreHandler::StoreGlobal(isolate(),
+                                           lookup->transition_cell());
         }
 
         Handle<Smi> smi_handler = StoreHandler::StoreGlobalProxy(isolate());

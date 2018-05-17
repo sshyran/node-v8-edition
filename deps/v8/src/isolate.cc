@@ -3012,6 +3012,8 @@ bool Isolate::Init(StartupDeserializer* des) {
       counters()->wasm_memory_allocation_result());
   wasm_engine_->memory_tracker()->SetAddressSpaceUsageHistogram(
       counters()->wasm_address_space_usage_mb());
+  wasm_engine_->code_manager()->SetModuleCodeSizeHistogram(
+      counters()->wasm_module_code_size_mb());
 
 // Initialize the interface descriptors ahead of time.
 #define INTERFACE_DESCRIPTOR(Name, ...) \
@@ -3034,18 +3036,26 @@ bool Isolate::Init(StartupDeserializer* des) {
   if (create_heap_objects) {
     // Terminate the partial snapshot cache so we can iterate.
     partial_snapshot_cache_.push_back(heap_.undefined_value());
-#ifdef V8_EMBEDDED_BUILTINS
-    if (serializer_enabled()) {
-      builtins_constants_table_builder_ =
-          new BuiltinsConstantsTableBuilder(this);
-    }
-#endif
   }
 
   InitializeThreadLocal();
 
   bootstrapper_->Initialize(create_heap_objects);
+
+#ifdef V8_EMBEDDED_BUILTINS
+  if (create_heap_objects && serializer_enabled()) {
+    builtins_constants_table_builder_ = new BuiltinsConstantsTableBuilder(this);
+  }
+#endif
   setup_delegate_->SetupBuiltins(this);
+#ifdef V8_EMBEDDED_BUILTINS
+  if (create_heap_objects && serializer_enabled()) {
+    builtins_constants_table_builder_->Finalize();
+    delete builtins_constants_table_builder_;
+    builtins_constants_table_builder_ = nullptr;
+  }
+#endif  // V8_EMBEDDED_BUILTINS
+
   if (create_heap_objects) heap_.CreateFixedStubs();
 
   if (FLAG_log_internal_timer_events) {
@@ -3072,16 +3082,12 @@ bool Isolate::Init(StartupDeserializer* des) {
     store_stub_cache_->Initialize();
     setup_delegate_->SetupInterpreter(interpreter_);
 
-#ifdef V8_EMBEDDED_BUILTINS
-    if (create_heap_objects && serializer_enabled()) {
-      builtins_constants_table_builder_->Finalize();
-      delete builtins_constants_table_builder_;
-      builtins_constants_table_builder_ = nullptr;
-    }
-#endif  // V8_EMBEDDED_BUILTINS
-
     heap_.NotifyDeserializationComplete();
   }
+  // Flush the instruction cache for the entire code-space. Must happen after
+  // builtins deserialization and setting the memory executable again.
+  if (!create_heap_objects) des->FlushICacheForNewIsolate();
+
   delete setup_delegate_;
   setup_delegate_ = nullptr;
 

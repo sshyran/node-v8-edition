@@ -101,6 +101,43 @@ TEST(TestPartiallyUnusedLabel) {
   ft.CheckCall(ft.true_value());
 }
 
+TEST(TestBuiltinSpecialization) {
+  Isolate* isolate(CcTest::InitIsolateOnce());
+  CodeAssemblerTester asm_tester(isolate, 0);
+  TestBuiltinsFromDSLAssembler m(asm_tester.state());
+  {
+    Node* temp = m.SmiConstant(0);
+    m.TestBuiltinSpecialization(m.UncheckedCast<Context>(temp));
+    m.Return(m.UndefinedConstant());
+  }
+  FunctionTester ft(asm_tester.GenerateCode(), 0);
+}
+
+TEST(TestMacroSpecialization) {
+  Isolate* isolate(CcTest::InitIsolateOnce());
+  CodeAssemblerTester asm_tester(isolate, 0);
+  TestBuiltinsFromDSLAssembler m(asm_tester.state());
+  {
+    m.TestMacroSpecialization();
+    m.Return(m.UndefinedConstant());
+  }
+  FunctionTester ft(asm_tester.GenerateCode(), 0);
+}
+
+TEST(TestFunctionPointers) {
+  Isolate* isolate(CcTest::InitIsolateOnce());
+  const int kNumParams = 0;
+  CodeAssemblerTester asm_tester(isolate, kNumParams);
+  TestBuiltinsFromDSLAssembler m(asm_tester.state());
+  {
+    TNode<Context> context =
+        m.UncheckedCast<Context>(m.Parameter(kNumParams + 2));
+    m.Return(m.TestFunctionPointers(context));
+  }
+  FunctionTester ft(asm_tester.GenerateCode(), 0);
+  ft.CheckCall(ft.true_value());
+}
+
 }  // namespace compiler
 }  // namespace internal
 }  // namespace v8

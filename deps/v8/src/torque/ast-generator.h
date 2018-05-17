@@ -41,6 +41,9 @@ class AstGenerator : public TorqueBaseVisitor {
   antlrcpp::Any visitExternalRuntime(
       TorqueParser::ExternalRuntimeContext* context) override;
 
+  antlrcpp::Any visitGenericSpecialization(
+      TorqueParser::GenericSpecializationContext* context) override;
+
   antlrcpp::Any visitConstDeclaration(
       TorqueParser::ConstDeclarationContext* context) override;
 
@@ -150,6 +153,13 @@ class AstGenerator : public TorqueBaseVisitor {
     ast_.AddNode(std::unique_ptr<AstNode>(node));
     return node;
   }
+
+  LabelAndTypesVector GetOptionalLabelAndTypeList(
+      TorqueParser::OptionalLabelListContext* context);
+  TypeExpression* GetType(TorqueParser::TypeContext* context);
+  TypeExpression* GetOptionalType(TorqueParser::OptionalTypeContext* context);
+  std::vector<TypeExpression*> GetTypeVector(
+      TorqueParser::TypeListContext* type_list);
 
   ParameterList GetOptionalParameterList(
       TorqueParser::ParameterListContext* context);

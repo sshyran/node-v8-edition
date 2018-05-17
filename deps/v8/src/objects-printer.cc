@@ -13,6 +13,9 @@
 #include "src/interpreter/bytecodes.h"
 #include "src/objects-inl.h"
 #include "src/objects/debug-objects-inl.h"
+#ifdef V8_INTL_SUPPORT
+#include "src/objects/js-locale-inl.h"
+#endif  // V8_INTL_SUPPORT
 #include "src/objects/microtask-inl.h"
 #include "src/objects/promise-inl.h"
 #include "src/ostreams.h"
@@ -257,6 +260,11 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case JS_DATA_VIEW_TYPE:
       JSDataView::cast(this)->JSDataViewPrint(os);
       break;
+#ifdef V8_INTL_SUPPORT
+    case JS_INTL_LOCALE_TYPE:
+      JSLocale::cast(this)->JSLocalePrint(os);
+      break;
+#endif  // V8_INTL_SUPPORT
 #define MAKE_STRUCT_CASE(NAME, Name, name) \
   case NAME##_TYPE:                        \
     Name::cast(this)->Name##Print(os);     \
@@ -1840,6 +1848,24 @@ void Script::ScriptPrint(std::ostream& os) {  // NOLINT
   os << "\n";
 }
 
+#ifdef V8_INTL_SUPPORT
+void JSLocale::JSLocalePrint(std::ostream& os) {  // NOLINT
+  HeapObject::PrintHeader(os, "JSLocale");
+  os << "\n - language: " << Brief(language());
+  os << "\n - script: " << Brief(script());
+  os << "\n - region: " << Brief(region());
+  os << "\n - baseName: " << Brief(base_name());
+  os << "\n - locale: " << Brief(locale());
+  os << "\n - calendar: " << Brief(calendar());
+  os << "\n - caseFirst: " << Brief(case_first());
+  os << "\n - collation: " << Brief(collation());
+  os << "\n - hourCycle: " << Brief(hour_cycle());
+  os << "\n - numeric: " << Brief(numeric());
+  os << "\n - numberingSystem: " << Brief(numbering_system());
+  os << "\n";
+}
+#endif  // V8_INTL_SUPPORT
+
 namespace {
 void PrintScopeInfoList(ScopeInfo* scope_info, std::ostream& os,
                         const char* list_name, int nof_internal_slots,
@@ -1997,6 +2023,29 @@ void InterpreterData::InterpreterDataPrint(std::ostream& os) {  // NOLINT
   os << "\n - bytecode_array: " << Brief(bytecode_array());
   os << "\n - interpreter_trampoline: " << Brief(interpreter_trampoline());
   os << "\n";
+}
+
+void MaybeObject::Print() {
+  OFStream os(stdout);
+  this->Print(os);
+  os << std::flush;
+}
+
+void MaybeObject::Print(std::ostream& os) {
+  Smi* smi;
+  HeapObject* heap_object;
+  if (ToSmi(&smi)) {
+    smi->SmiPrint(os);
+  } else if (IsClearedWeakHeapObject()) {
+    os << "[cleared]";
+  } else if (ToWeakHeapObject(&heap_object)) {
+    os << "[weak] ";
+    heap_object->HeapObjectPrint(os);
+  } else if (ToStrongHeapObject(&heap_object)) {
+    heap_object->HeapObjectPrint(os);
+  } else {
+    UNREACHABLE();
+  }
 }
 
 #endif  // OBJECT_PRINT
@@ -2228,6 +2277,7 @@ void JSObject::PrintTransitions(std::ostream& os) {  // NOLINT
   os << "\n - transitions";
   ta.PrintTransitions(os);
 }
+
 #endif  // defined(DEBUG) || defined(OBJECT_PRINT)
 }  // namespace internal
 }  // namespace v8

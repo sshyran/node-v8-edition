@@ -1,4 +1,5 @@
 {
+  "owners": ["jarin@chromium.org", "mvstanston@chromium.org"],
   "name": "JSTests",
   "run_count": 3,
   "run_count_arm": 1,
@@ -476,6 +477,19 @@
         {"name": "Object.hasOwnProperty--el"},
         {"name": "Object.hasOwnProperty--el-str"},
         {"name": "Object.hasOwnProperty--NE-el"}
+      ]
+    },
+    {
+      "name": "DataView",
+      "path": ["DataView"],
+      "main": "run.js",
+      "resources": ["dataviewtest.js"],
+      "results_regexp": "^DataView\\-%s\\(Score\\): (.+)$",
+      "tests": [
+	{"name": "DataViewTest-DataView-BigEndian"},
+	{"name": "DataViewTest-DataView-LittleEndian"},
+	{"name": "DataViewTest-TypedArray-BigEndian"},
+	{"name": "DataViewTest-TypedArray-LittleEndian"}
       ]
     },
     {

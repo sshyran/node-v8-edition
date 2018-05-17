@@ -57,8 +57,7 @@ class IndirectFunctionTableEntry {
   inline IndirectFunctionTableEntry(Handle<WasmInstanceObject>, int index);
 
   void clear();
-  void set(int sig_id, WasmInstanceObject* instance,
-           const wasm::WasmCode* wasm_code);
+  void set(int sig_id, WasmInstanceObject* instance, Address call_target);
 
   WasmInstanceObject* instance();
   int sig_id();
@@ -85,10 +84,11 @@ class ImportedFunctionEntry {
   inline ImportedFunctionEntry(Handle<WasmInstanceObject>, int index);
 
   // Initialize this entry as a {JSReceiver} call.
-  void set(JSReceiver* callable, const wasm::WasmCode* wasm_to_js_wrapper);
+  void set_wasm_to_js(JSReceiver* callable,
+                      const wasm::WasmCode* wasm_to_js_wrapper);
   // Initialize this entry as a WASM to WASM call.
-  void set(WasmInstanceObject* target_instance,
-           const wasm::WasmCode* wasm_function);
+  void set_wasm_to_wasm(WasmInstanceObject* target_instance,
+                        Address call_target);
 
   WasmInstanceObject* instance();
   JSReceiver* callable();
@@ -175,7 +175,7 @@ class WasmTableObject : public JSObject {
                                    Handle<WasmTableObject> table,
                                    int table_index, wasm::FunctionSig* sig,
                                    Handle<WasmInstanceObject> from_instance,
-                                   wasm::WasmCode* wasm_code);
+                                   Address call_target);
 
   static void ClearDispatchTables(Isolate* isolate,
                                   Handle<WasmTableObject> table, int index);
@@ -376,7 +376,12 @@ class WasmExportedFunction : public JSFunction {
                                           int func_index, int arity,
                                           Handle<Code> export_wrapper);
 
+  // TODO(clemensh): Remove this. There might not be a WasmCode object available
+  // yet.
+  // TODO(all): Replace all uses by {GetWasmCallTarget()}.
   wasm::WasmCode* GetWasmCode();
+
+  Address GetWasmCallTarget();
 };
 
 // Information for a WasmExportedFunction which is referenced as the function

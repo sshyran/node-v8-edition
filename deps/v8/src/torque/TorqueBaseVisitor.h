@@ -26,6 +26,16 @@ class TorqueBaseVisitor : public TorqueVisitor {
     return visitChildren(ctx);
   }
 
+  antlrcpp::Any visitGenericSpecializationTypeList(
+      TorqueParser::GenericSpecializationTypeListContext* ctx) override {
+    return visitChildren(ctx);
+  }
+
+  antlrcpp::Any visitOptionalGenericTypeList(
+      TorqueParser::OptionalGenericTypeListContext* ctx) override {
+    return visitChildren(ctx);
+  }
+
   antlrcpp::Any visitTypeListMaybeVarArgs(
       TorqueParser::TypeListMaybeVarArgsContext* ctx) override {
     return visitChildren(ctx);
@@ -307,6 +317,11 @@ class TorqueBaseVisitor : public TorqueVisitor {
 
   antlrcpp::Any visitBuiltinDeclaration(
       TorqueParser::BuiltinDeclarationContext* ctx) override {
+    return visitChildren(ctx);
+  }
+
+  antlrcpp::Any visitGenericSpecialization(
+      TorqueParser::GenericSpecializationContext* ctx) override {
     return visitChildren(ctx);
   }
 

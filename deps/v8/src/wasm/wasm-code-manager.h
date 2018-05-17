@@ -22,6 +22,7 @@ namespace internal {
 
 struct CodeDesc;
 class Code;
+class Histogram;
 class WasmCompiledModule;
 
 namespace wasm {
@@ -85,7 +86,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
     kFunction,
     kWasmToJsWrapper,
     kLazyStub,
-    kInterpreterStub,
+    kInterpreterEntry,
     kTrampoline
   };
 
@@ -230,11 +231,11 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // certain wrappers using a different pipeline.
   WasmCode* AddCodeCopy(Handle<Code> code, WasmCode::Kind kind, uint32_t index);
 
-  // Add an interpreter wrapper. For the same reason as AddCodeCopy, we
+  // Add an interpreter entry. For the same reason as AddCodeCopy, we
   // currently compile these using a different pipeline and we can't get a
   // CodeDesc here. When adding interpreter wrappers, we do not insert them in
   // the code_table, however, we let them self-identify as the {index} function
-  WasmCode* AddInterpreterWrapper(Handle<Code> code, uint32_t index);
+  WasmCode* AddInterpreterEntry(Handle<Code> code, uint32_t index);
 
   // When starting lazy compilation, provide the WasmLazyCompile builtin by
   // calling SetLazyBuiltin. It will initialize the code table with it. Copies
@@ -259,15 +260,21 @@ class V8_EXPORT_PRIVATE NativeModule final {
     code_table_[index] = wasm_code;
   }
 
+  bool has_code(uint32_t index) const {
+    DCHECK_LT(index, function_count());
+    return code_table_[index] != nullptr;
+  }
+
   // Register/release the protected instructions in all code objects with the
   // global trap handler for this process.
   void UnpackAndRegisterProtectedInstructions();
   void ReleaseProtectedInstructions();
 
-  // Gets code suitable for indirect or import calls for the given function
-  // index. If the code at the given index is the lazy compile stub, it will
-  // clone a non-anonymous lazy compile stub for the purpose.
-  WasmCode* GetIndirectlyCallableCode(uint32_t func_index);
+  // Returns the instruction start of code suitable for indirect or import calls
+  // for the given function index. If the code at the given index is the lazy
+  // compile stub, it will clone a non-anonymous lazy compile stub for the
+  // purpose. This will soon change to always return a jump table slot.
+  Address GetCallTargetForFunction(uint32_t index);
 
   bool SetExecutable(bool executable);
 
@@ -284,7 +291,6 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   uint32_t num_imported_functions() const { return num_imported_functions_; }
   const std::vector<WasmCode*>& code_table() const { return code_table_; }
-  size_t committed_memory() const { return committed_memory_; }
   bool use_trap_handler() const { return use_trap_handler_; }
   void set_lazy_compile_frozen(bool frozen) { lazy_compile_frozen_ = frozen; }
   bool lazy_compile_frozen() const { return lazy_compile_frozen_; }
@@ -300,7 +306,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   static base::AtomicNumber<size_t> next_id_;
   NativeModule(uint32_t num_functions, uint32_t num_imports,
-               bool can_request_more, VirtualMemory* vmem,
+               bool can_request_more, VirtualMemory* code_space,
                WasmCodeManager* code_manager, ModuleEnv& env);
 
   WasmCode* AddAnonymousCode(Handle<Code>, WasmCode::Kind kind);
@@ -344,12 +350,13 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // when the phantom reference is cleared.
   WasmSharedModuleData** shared_module_data_ = nullptr;
 
-  DisjointAllocationPool free_memory_;
-  DisjointAllocationPool allocated_memory_;
-  std::list<VirtualMemory> owned_memory_;
+  DisjointAllocationPool free_code_space_;
+  DisjointAllocationPool allocated_code_space_;
+  std::list<VirtualMemory> owned_code_space_;
+
   WasmCodeManager* wasm_code_manager_;
   base::Mutex allocation_mutex_;
-  size_t committed_memory_ = 0;
+  size_t committed_code_space_ = 0;
   int modification_scope_depth_ = 0;
   bool can_request_more_memory_;
   bool use_trap_handler_;
@@ -380,7 +387,11 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
 
   WasmCode* LookupCode(Address pc) const;
   WasmCode* GetCodeFromStartAddress(Address pc) const;
-  size_t remaining_uncommitted() const;
+  size_t remaining_uncommitted_code_space() const;
+
+  void SetModuleCodeSizeHistogram(Histogram* histogram) {
+    module_code_size_mb_ = histogram;
+  }
 
  private:
   friend class NativeModule;
@@ -388,10 +399,10 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   void TryAllocate(size_t size, VirtualMemory*, void* hint = nullptr);
   bool Commit(Address, size_t);
   // Currently, we uncommit a whole module, so all we need is account
-  // for the freed memory size. We do that in FreeNativeModuleMemories.
+  // for the freed memory size. We do that in FreeNativeModule.
   // There's no separate Uncommit.
 
-  void FreeNativeModuleMemories(NativeModule*);
+  void FreeNativeModule(NativeModule*);
   void Free(VirtualMemory* mem);
   void AssignRanges(Address start, Address end, NativeModule*);
   size_t GetAllocationChunk(const WasmModule& module);
@@ -401,10 +412,13 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   // Count of NativeModules not yet collected. Helps determine if it's
   // worth requesting a GC on memory pressure.
   size_t active_ = 0;
-  std::atomic<size_t> remaining_uncommitted_;
+  std::atomic<size_t> remaining_uncommitted_code_space_;
 
   // TODO(mtrofin): remove the dependency on isolate.
   v8::Isolate* isolate_;
+
+  // Histogram to update with the maximum used code space for each NativeModule.
+  Histogram* module_code_size_mb_ = nullptr;
 
   DISALLOW_COPY_AND_ASSIGN(WasmCodeManager);
 };

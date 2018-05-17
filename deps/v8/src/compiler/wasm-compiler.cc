@@ -4298,7 +4298,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     return instance;
   }
 
-  void BuildJSToWasmWrapper(wasm::WasmCode* wasm_code) {
+  void BuildJSToWasmWrapper(Address call_target) {
     const int wasm_count = static_cast<int>(sig_->parameter_count());
     const int count =
         wasm_count + 4;  // wasm_code, instance_node, effect, and control.
@@ -4327,10 +4327,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     DCHECK_NULL(instance_node_);
     instance_node_ = BuildLoadInstanceFromExportedFunction(js_closure);
 
-    Address instr_start =
-        wasm_code == nullptr ? kNullAddress : wasm_code->instruction_start();
     Node* wasm_code_node = mcgraph()->RelocatableIntPtrConstant(
-        instr_start, RelocInfo::JS_TO_WASM_CALL);
+        call_target, RelocInfo::JS_TO_WASM_CALL);
     if (!wasm::IsJSCompatibleSignature(sig_)) {
       // Throw a TypeError. Use the js_context of the calling javascript
       // function (passed as a parameter), such that the generated code is
@@ -4691,7 +4689,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
 }  // namespace
 
 Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
-                                    wasm::WasmCode* wasm_code, uint32_t index,
+                                    Address call_target, uint32_t index,
                                     wasm::UseTrapHandler use_trap_handler) {
   const wasm::WasmFunction* func = &module->functions[index];
 
@@ -4714,12 +4712,22 @@ Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
   WasmWrapperGraphBuilder builder(&zone, &env, &jsgraph, func->sig, nullptr);
   builder.set_control_ptr(&control);
   builder.set_effect_ptr(&effect);
-  builder.BuildJSToWasmWrapper(wasm_code);
+  builder.BuildJSToWasmWrapper(call_target);
 
   //----------------------------------------------------------------------------
   // Run the compilation pipeline.
   //----------------------------------------------------------------------------
-  if (FLAG_trace_turbo_graph) {  // Simple textual RPO.
+#ifdef DEBUG
+  EmbeddedVector<char, 32> func_name;
+  static unsigned id = 0;
+  func_name.Truncate(SNPrintF(func_name, "js-to-wasm#%d", id++));
+#else
+  Vector<const char> func_name = CStrVector("js-to-wasm");
+#endif
+
+  OptimizedCompilationInfo info(func_name, &zone, Code::JS_TO_WASM_FUNCTION);
+
+  if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
     OFStream os(stdout);
     os << "-- Graph after change lowering -- " << std::endl;
     os << AsRPO(graph);
@@ -4731,15 +4739,6 @@ Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
   CallDescriptor* incoming = Linkage::GetJSCallDescriptor(
       &zone, false, params + 1, CallDescriptor::kNoFlags);
 
-#ifdef DEBUG
-  EmbeddedVector<char, 32> func_name;
-  static unsigned id = 0;
-  func_name.Truncate(SNPrintF(func_name, "js-to-wasm#%d", id++));
-#else
-  Vector<const char> func_name = CStrVector("js-to-wasm");
-#endif
-
-  OptimizedCompilationInfo info(func_name, &zone, Code::JS_TO_WASM_FUNCTION);
   Handle<Code> code =
       Pipeline::GenerateCodeForTesting(&info, isolate, incoming, &graph);
 #ifdef ENABLE_DISASSEMBLER
@@ -4822,7 +4821,17 @@ Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
   builder.set_effect_ptr(&effect);
   builder.BuildWasmToJSWrapper(target, index);
 
-  if (FLAG_trace_turbo_graph) {  // Simple textual RPO.
+#ifdef DEBUG
+  EmbeddedVector<char, 32> func_name;
+  static unsigned id = 0;
+  func_name.Truncate(SNPrintF(func_name, "wasm-to-js#%d", id++));
+#else
+  Vector<const char> func_name = CStrVector("wasm-to-js");
+#endif
+
+  OptimizedCompilationInfo info(func_name, &zone, Code::WASM_TO_JS_FUNCTION);
+
+  if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
     OFStream os(stdout);
     os << "-- Graph after change lowering -- " << std::endl;
     os << AsRPO(graph);
@@ -4834,15 +4843,6 @@ Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
     incoming = GetI32WasmCallDescriptor(&zone, incoming);
   }
 
-#ifdef DEBUG
-  EmbeddedVector<char, 32> func_name;
-  static unsigned id = 0;
-  func_name.Truncate(SNPrintF(func_name, "wasm-to-js#%d", id++));
-#else
-  Vector<const char> func_name = CStrVector("wasm-to-js");
-#endif
-
-  OptimizedCompilationInfo info(func_name, &zone, Code::WASM_TO_JS_FUNCTION);
   Handle<Code> code = Pipeline::GenerateCodeForTesting(
       &info, isolate, incoming, &graph, nullptr, source_position_table);
   ValidateImportWrapperReferencesImmovables(code);
@@ -4887,12 +4887,6 @@ Handle<Code> CompileWasmInterpreterEntry(Isolate* isolate, uint32_t func_index,
 
   Handle<Code> code = Handle<Code>::null();
   {
-    if (FLAG_trace_turbo_graph) {  // Simple textual RPO.
-      OFStream os(stdout);
-      os << "-- Wasm interpreter entry graph -- " << std::endl;
-      os << AsRPO(graph);
-    }
-
     // Schedule and compile to machine code.
     CallDescriptor* incoming = GetWasmCallDescriptor(&zone, sig);
     if (machine.Is32()) {
@@ -4908,6 +4902,13 @@ Handle<Code> CompileWasmInterpreterEntry(Isolate* isolate, uint32_t func_index,
 
     OptimizedCompilationInfo info(func_name, &zone,
                                   Code::WASM_INTERPRETER_ENTRY);
+
+    if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
+      OFStream os(stdout);
+      os << "-- Wasm interpreter entry graph -- " << std::endl;
+      os << AsRPO(graph);
+    }
+
     code = Pipeline::GenerateCodeForTesting(&info, isolate, incoming, &graph,
                                             nullptr);
 #ifdef ENABLE_DISASSEMBLER
@@ -4945,12 +4946,6 @@ Handle<Code> CompileCWasmEntry(Isolate* isolate, wasm::FunctionSig* sig) {
   builder.set_effect_ptr(&effect);
   builder.BuildCWasmEntry();
 
-  if (FLAG_trace_turbo_graph) {  // Simple textual RPO.
-    OFStream os(stdout);
-    os << "-- C Wasm entry graph -- " << std::endl;
-    os << AsRPO(graph);
-  }
-
   // Schedule and compile to machine code.
   CallDescriptor* incoming = Linkage::GetJSCallDescriptor(
       &zone, false, CWasmEntryParameters::kNumParameters + 1,
@@ -4974,6 +4969,13 @@ Handle<Code> CompileCWasmEntry(Isolate* isolate, wasm::FunctionSig* sig) {
   Vector<const char> debug_name_vec(debug_name, name_len);
 
   OptimizedCompilationInfo info(debug_name_vec, &zone, Code::C_WASM_ENTRY);
+
+  if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
+    OFStream os(stdout);
+    os << "-- C Wasm entry graph -- " << std::endl;
+    os << AsRPO(graph);
+  }
+
   Handle<Code> code =
       Pipeline::GenerateCodeForTesting(&info, isolate, incoming, &graph);
 #ifdef ENABLE_DISASSEMBLER

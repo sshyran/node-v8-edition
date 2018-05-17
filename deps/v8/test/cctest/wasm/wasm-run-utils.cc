@@ -54,7 +54,7 @@ TestingModuleBuilder::TestingModuleBuilder(
         code, wasm::WasmCode::kWasmToJsWrapper, maybe_import_index);
 
     ImportedFunctionEntry(instance_object_, maybe_import_index)
-        .set(*maybe_import->js_function, wasm_to_js_wrapper);
+        .set_wasm_to_js(*maybe_import->js_function, wasm_to_js_wrapper);
   }
 
   if (mode == kExecuteInterpreter) {
@@ -120,7 +120,7 @@ Handle<JSFunction> TestingModuleBuilder::WrapCode(uint32_t index) {
   Link();
   wasm::WasmCode* code = native_module_->code(index);
   Handle<Code> ret_code = compiler::CompileJSToWasmWrapper(
-      isolate_, test_module_ptr_, code, index,
+      isolate_, test_module_ptr_, code->instruction_start(), index,
       trap_handler::IsTrapHandlerEnabled() ? kUseTrapHandler : kNoTrapHandler);
   Handle<JSFunction> ret = WasmExportedFunction::New(
       isolate_, instance_object(), MaybeHandle<String>(),
@@ -166,7 +166,8 @@ void TestingModuleBuilder::PopulateIndirectFunctionTable() {
       WasmFunction& function = test_module_->functions[table.values[j]];
       int sig_id = test_module_->signature_map.Find(function.sig);
       auto wasm_code = native_module_->code(function.func_index);
-      IndirectFunctionTableEntry(instance, j).set(sig_id, *instance, wasm_code);
+      IndirectFunctionTableEntry(instance, j)
+          .set(sig_id, *instance, wasm_code->instruction_start());
     }
   }
 }

@@ -2087,6 +2087,9 @@ v8_source_set("v8_base") {
     "src/objects/js-array.h",
     "src/objects/js-collection-inl.h",
     "src/objects/js-collection.h",
+    "src/objects/js-locale-inl.h",
+    "src/objects/js-locale.cc",
+    "src/objects/js-locale.h",
     "src/objects/js-promise-inl.h",
     "src/objects/js-promise.h",
     "src/objects/js-regexp-inl.h",
@@ -2761,6 +2764,9 @@ v8_source_set("v8_base") {
       "src/intl.h",
       "src/objects/intl-objects.cc",
       "src/objects/intl-objects.h",
+      "src/objects/js-locale-inl.h",
+      "src/objects/js-locale.cc",
+      "src/objects/js-locale.h",
       "src/runtime/runtime-intl.cc",
     ]
   }
@@ -2840,6 +2846,8 @@ v8_component("v8_libbase") {
 
   public_configs = [ ":libbase_config" ]
 
+  public_deps = []
+
   data = []
 
   data_deps = []
@@ -2911,6 +2919,7 @@ v8_component("v8_libbase") {
       "src/base/debug/stack_trace_fuchsia.cc",
       "src/base/platform/platform-fuchsia.cc",
     ]
+    public_deps += [ "//third_party/fuchsia-sdk:launchpad" ]
   } else if (is_mac) {
     sources += [
       "src/base/debug/stack_trace_posix.cc",
@@ -3089,6 +3098,7 @@ if (current_toolchain == v8_snapshot_toolchain) {
       "src/torque/ast-generator.cc",
       "src/torque/ast-generator.h",
       "src/torque/ast.h",
+      "src/torque/contextual.h",
       "src/torque/declarable.cc",
       "src/torque/declarable.h",
       "src/torque/declaration-visitor.cc",
