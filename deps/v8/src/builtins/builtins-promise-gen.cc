@@ -56,7 +56,7 @@ Node* PromiseBuiltinsAssembler::AllocateAndInitJSPromise(Node* context,
   PromiseInit(instance);
 
   Label out(this);
-  GotoIfNot(IsPromiseHookEnabledOrDebugIsActive(), &out);
+  GotoIfNot(IsPromiseHookEnabledOrHasAsyncEventDelegate(), &out);
   CallRuntime(Runtime::kPromiseHookInit, context, instance, parent);
   Goto(&out);
 
@@ -80,7 +80,7 @@ Node* PromiseBuiltinsAssembler::AllocateAndSetJSPromise(
   }
 
   Label out(this);
-  GotoIfNot(IsPromiseHookEnabledOrDebugIsActive(), &out);
+  GotoIfNot(IsPromiseHookEnabledOrHasAsyncEventDelegate(), &out);
   CallRuntime(Runtime::kPromiseHookInit, context, instance,
               UndefinedConstant());
   Goto(&out);
@@ -839,7 +839,7 @@ TF_BUILTIN(PromiseConstructor, PromiseBuiltinsAssembler) {
     PromiseInit(instance);
     var_result.Bind(instance);
 
-    GotoIfNot(IsPromiseHookEnabledOrDebugIsActive(), &debug_push);
+    GotoIfNot(IsPromiseHookEnabledOrHasAsyncEventDelegate(), &debug_push);
     CallRuntime(Runtime::kPromiseHookInit, context, instance,
                 UndefinedConstant());
     Goto(&debug_push);
@@ -1059,7 +1059,8 @@ TF_BUILTIN(PromiseResolveThenableJob, PromiseBuiltinsAssembler) {
   GotoIfNot(WordEqual(then, promise_then), &if_slow);
   Node* const thenable_map = LoadMap(thenable);
   GotoIfNot(IsJSPromiseMap(thenable_map), &if_slow);
-  GotoIf(IsPromiseHookEnabledOrDebugIsActive(), &if_slow);
+  GotoIf(IsPromiseHookEnabled(), &if_slow);
+  GotoIf(IsDebugActive(), &if_slow);
   BranchIfPromiseSpeciesLookupChainIntact(native_context, thenable_map,
                                           &if_fast, &if_slow);
 
@@ -1665,7 +1666,8 @@ TF_BUILTIN(RejectPromise, PromiseBuiltinsAssembler) {
   // the runtime handle this operation, which greatly reduces
   // the complexity here and also avoids a couple of back and
   // forth between JavaScript and C++ land.
-  GotoIf(IsPromiseHookEnabledOrDebugIsActive(), &if_runtime);
+  GotoIf(IsPromiseHookEnabled(), &if_runtime);
+  GotoIf(IsDebugActive(), &if_runtime);
 
   // 7. If promise.[[PromiseIsHandled]] is false, perform
   //    HostPromiseRejectionTracker(promise, "reject").
@@ -1712,7 +1714,8 @@ TF_BUILTIN(ResolvePromise, PromiseBuiltinsAssembler) {
   // the runtime handle this operation, which greatly reduces
   // the complexity here and also avoids a couple of back and
   // forth between JavaScript and C++ land.
-  GotoIf(IsPromiseHookEnabledOrDebugIsActive(), &if_runtime);
+  GotoIf(IsPromiseHookEnabled(), &if_runtime);
+  GotoIf(IsDebugActive(), &if_runtime);
 
   // 6. If SameValue(resolution, promise) is true, then
   // We can use pointer comparison here, since the {promise} is guaranteed
@@ -2023,9 +2026,9 @@ TF_BUILTIN(PromiseAll, PromiseBuiltinsAssembler) {
 }
 
 TF_BUILTIN(PromiseAllResolveElementClosure, PromiseBuiltinsAssembler) {
-  Node* const value = Parameter(Descriptor::kValue);
-  Node* const context = Parameter(Descriptor::kContext);
-  Node* const function = LoadFromFrame(StandardFrameConstants::kFunctionOffset);
+  TNode<Object> value = CAST(Parameter(Descriptor::kValue));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+  Node* function = LoadFromFrame(StandardFrameConstants::kFunctionOffset);
 
   Label already_called(this, Label::kDeferred), resolve_promise(this);
 
@@ -2037,22 +2040,22 @@ TF_BUILTIN(PromiseAllResolveElementClosure, PromiseBuiltinsAssembler) {
   GotoIf(IsNativeContext(context), &already_called);
   CSA_ASSERT(this, SmiEqual(LoadFixedArrayBaseLength(context),
                             SmiConstant(kPromiseAllResolveElementLength)));
-  Node* const native_context = LoadNativeContext(context);
+  TNode<Context> native_context = LoadNativeContext(context);
   StoreObjectField(function, JSFunction::kContextOffset, native_context);
 
   // Determine the index from the {function}.
   Label unreachable(this, Label::kDeferred);
   STATIC_ASSERT(PropertyArray::kNoHashSentinel == 0);
-  Node* const identity_hash =
+  TNode<IntPtrT> identity_hash =
       LoadJSReceiverIdentityHash(function, &unreachable);
   CSA_ASSERT(this, IntPtrGreaterThan(identity_hash, IntPtrConstant(0)));
-  Node* const index = IntPtrSub(identity_hash, IntPtrConstant(1));
+  TNode<IntPtrT> index = IntPtrSub(identity_hash, IntPtrConstant(1));
 
   // Check if we need to grow the [[ValuesArray]] to store {value} at {index}.
-  Node* const values_array =
-      LoadContextElement(context, kPromiseAllResolveElementValuesArraySlot);
-  Node* const elements = LoadElements(values_array);
-  Node* const values_length =
+  TNode<JSArray> values_array = CAST(
+      LoadContextElement(context, kPromiseAllResolveElementValuesArraySlot));
+  TNode<FixedArray> elements = CAST(LoadElements(values_array));
+  TNode<IntPtrT> values_length =
       LoadAndUntagObjectField(values_array, JSArray::kLengthOffset);
   Label if_inbounds(this), if_outofbounds(this), done(this);
   Branch(IntPtrLessThan(index, values_length), &if_inbounds, &if_outofbounds);
@@ -2060,8 +2063,8 @@ TF_BUILTIN(PromiseAllResolveElementClosure, PromiseBuiltinsAssembler) {
   BIND(&if_outofbounds);
   {
     // Check if we need to grow the backing store.
-    Node* const new_length = IntPtrAdd(index, IntPtrConstant(1));
-    Node* const elements_length =
+    TNode<IntPtrT> new_length = IntPtrAdd(index, IntPtrConstant(1));
+    TNode<IntPtrT> elements_length =
         LoadAndUntagObjectField(elements, FixedArray::kLengthOffset);
     Label if_grow(this, Label::kDeferred), if_nogrow(this);
     Branch(IntPtrLessThan(index, elements_length), &if_nogrow, &if_grow);
@@ -2069,14 +2072,14 @@ TF_BUILTIN(PromiseAllResolveElementClosure, PromiseBuiltinsAssembler) {
     BIND(&if_grow);
     {
       // We need to grow the backing store to fit the {index} as well.
-      Node* const new_elements_length =
+      TNode<IntPtrT> new_elements_length =
           IntPtrMin(CalculateNewElementsCapacity(new_length),
                     IntPtrConstant(PropertyArray::HashField::kMax + 1));
       CSA_ASSERT(this, IntPtrLessThan(index, new_elements_length));
       CSA_ASSERT(this, IntPtrLessThan(elements_length, new_elements_length));
-      Node* const new_elements = AllocateFixedArray(
-          PACKED_ELEMENTS, new_elements_length, INTPTR_PARAMETERS,
-          AllocationFlag::kAllowLargeObjectAllocation);
+      TNode<FixedArray> new_elements =
+          AllocateFixedArray(PACKED_ELEMENTS, new_elements_length,
+                             AllocationFlag::kAllowLargeObjectAllocation);
       CopyFixedArrayElements(PACKED_ELEMENTS, elements, PACKED_ELEMENTS,
                              new_elements, elements_length,
                              new_elements_length);
@@ -2118,9 +2121,9 @@ TF_BUILTIN(PromiseAllResolveElementClosure, PromiseBuiltinsAssembler) {
   Return(UndefinedConstant());
 
   BIND(&resolve_promise);
-  Node* const capability =
-      LoadContextElement(context, kPromiseAllResolveElementCapabilitySlot);
-  Node* const resolve =
+  TNode<PromiseCapability> capability = CAST(
+      LoadContextElement(context, kPromiseAllResolveElementCapabilitySlot));
+  TNode<Object> resolve =
       LoadObjectField(capability, PromiseCapability::kResolveOffset);
   CallJS(CodeFactory::Call(isolate(), ConvertReceiverMode::kNullOrUndefined),
          context, resolve, UndefinedConstant(), values_array);

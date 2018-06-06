@@ -888,7 +888,7 @@ void Heap::ProcessPretenuringFeedback() {
 void Heap::InvalidateCodeEmbeddedObjects(Code* code) {
   MemoryChunk* chunk = MemoryChunk::FromAddress(code->address());
   CodePageMemoryModificationScope modification_scope(chunk);
-  code->InvalidateEmbeddedObjects();
+  code->InvalidateEmbeddedObjects(this);
 }
 
 void Heap::InvalidateCodeDeoptimizationData(Code* code) {
@@ -2246,7 +2246,7 @@ void Heap::ComputeFastPromotionMode() {
       !FLAG_optimize_for_size && FLAG_fast_promotion_new_space &&
       !ShouldReduceMemory() && new_space_->IsAtMaximumCapacity() &&
       survived_in_new_space >= kMinPromotedPercentForFastPromotionMode;
-  if (FLAG_trace_gc_verbose) {
+  if (FLAG_trace_gc_verbose && !FLAG_trace_gc_ignore_scavenger) {
     PrintIsolate(
         isolate(), "Fast promotion mode: %s survival rate: %" PRIuS "%%\n",
         fast_promotion_mode_ ? "true" : "false", survived_in_new_space);
@@ -2875,12 +2875,10 @@ void Heap::RightTrimFixedArray(FixedArrayBase* object, int elements_to_trim) {
 
 void Heap::RightTrimWeakFixedArray(WeakFixedArray* object,
                                    int elements_to_trim) {
-  // This function is safe to use only 1) during GC and 2) for old space
-  // WeakFixedArrays: 1) When marking, we record the weak slots, and shrinking
-  // invalidates them. 2) Scavenger might move new space WeakFixedArrays around,
-  // making the recorded slots collide with other objects.
+  // This function is safe to use only at the end of the mark compact
+  // collection: When marking, we record the weak slots, and shrinking
+  // invalidates them.
   DCHECK_EQ(gc_state(), MARK_COMPACT);
-  DCHECK(InOldSpace(object));
   CreateFillerForArray<WeakFixedArray>(object, elements_to_trim,
                                        elements_to_trim * kPointerSize);
 }
@@ -3869,6 +3867,26 @@ void Heap::ZapCodeObject(Address start_address, int size_in_bytes) {
 #endif
 }
 
+Code* Heap::builtin(int index) {
+  DCHECK(Builtins::IsBuiltinId(index));
+  // Code::cast cannot be used here since we access builtins
+  // during the marking phase of mark sweep. See IC::Clear.
+  return reinterpret_cast<Code*>(builtins_[index]);
+}
+
+Address Heap::builtin_address(int index) {
+  DCHECK(Builtins::IsBuiltinId(index) || index == Builtins::builtin_count);
+  return reinterpret_cast<Address>(&builtins_[index]);
+}
+
+void Heap::set_builtin(int index, HeapObject* builtin) {
+  DCHECK(Builtins::IsBuiltinId(index));
+  DCHECK(Internals::HasHeapObjectTag(builtin));
+  // The given builtin may be completely uninitialized thus we cannot check its
+  // type here.
+  builtins_[index] = builtin;
+}
+
 void Heap::IterateRoots(RootVisitor* v, VisitMode mode) {
   IterateStrongRoots(v, mode);
   IterateWeakRoots(v, mode);
@@ -3984,7 +4002,7 @@ void Heap::IterateStrongRoots(RootVisitor* v, VisitMode mode) {
   // heap. Note that it is not necessary to iterate over code objects
   // on scavenge collections.
   if (!isMinorGC) {
-    isolate_->builtins()->IterateBuiltins(v);
+    IterateBuiltins(v);
     v->Synchronize(VisitorSynchronization::kBuiltins);
     isolate_->interpreter()->IterateDispatchTable(v);
     v->Synchronize(VisitorSynchronization::kDispatchTable);
@@ -4046,6 +4064,12 @@ void Heap::IterateStrongRoots(RootVisitor* v, VisitMode mode) {
 
 void Heap::IterateWeakGlobalHandles(RootVisitor* v) {
   isolate_->global_handles()->IterateWeakRoots(v);
+}
+
+void Heap::IterateBuiltins(RootVisitor* v) {
+  for (int i = 0; i < Builtins::builtin_count; i++) {
+    v->VisitRootPointer(Root::kBuiltins, Builtins::name(i), &builtins_[i]);
+  }
 }
 
 // TODO(1236194): Since the heap size is configurable on the command line
@@ -5110,8 +5134,10 @@ void Heap::AddRetainedMap(Handle<Map> map) {
   if (array->IsFull()) {
     CompactRetainedMaps(*array);
   }
-  array =
-      WeakArrayList::Add(array, map, Smi::FromInt(FLAG_retain_maps_for_n_gc));
+  array = WeakArrayList::AddToEnd(array, MaybeObjectHandle::Weak(map));
+  array = WeakArrayList::AddToEnd(
+      array,
+      MaybeObjectHandle(Smi::FromInt(FLAG_retain_maps_for_n_gc), isolate()));
   if (*array != retained_maps()) {
     set_retained_maps(*array);
   }

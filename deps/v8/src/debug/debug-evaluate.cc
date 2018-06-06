@@ -332,10 +332,8 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
   V(IsArray)                             \
   V(IsDate)                              \
   V(IsFunction)                          \
-  V(IsJSMap)                             \
   V(IsJSProxy)                           \
   V(IsJSReceiver)                        \
-  V(IsJSSet)                             \
   V(IsJSWeakMap)                         \
   V(IsJSWeakSet)                         \
   V(IsRegExp)                            \
@@ -355,12 +353,6 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
   V(TrySliceSimpleNonFastElements)       \
   V(TypedArrayGetBuffer)                 \
   /* DataView */                         \
-  V(DataViewGetInt8)                     \
-  V(DataViewGetUint8)                    \
-  V(DataViewGetInt16)                    \
-  V(DataViewGetUint16)                   \
-  V(DataViewGetInt32)                    \
-  V(DataViewGetUint32)                   \
   V(DataViewGetFloat32)                  \
   V(DataViewGetFloat64)                  \
   V(DataViewGetBigInt64)                 \
@@ -636,6 +628,7 @@ SharedFunctionInfo::SideEffectState BuiltinGetSideEffectState(
     case Builtins::kArrayPrototypeFlatMap:
     case Builtins::kArrayPrototypeKeys:
     case Builtins::kArrayPrototypeSlice:
+    case Builtins::kArrayPrototypeSort:
     case Builtins::kArrayForEach:
     case Builtins::kArrayEvery:
     case Builtins::kArraySome:

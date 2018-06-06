@@ -98,7 +98,7 @@ class TestingModuleBuilder {
 
   byte* AddMemory(uint32_t size);
 
-  size_t CodeTableLength() const { return native_module_->function_count(); }
+  size_t CodeTableLength() const { return native_module_->num_functions(); }
 
   template <typename T>
   T* AddMemoryElems(uint32_t count) {
@@ -275,9 +275,10 @@ class WasmFunctionWrapper : private compiler::GraphAndBuilders {
     compiler::NodeProperties::ChangeOp(
         inner_code_node_,
         kPointerSize == 8
-            ? common()->RelocatableInt64Constant(address, RelocInfo::WASM_CALL)
+            ? common()->RelocatableInt64Constant(address,
+                                                 RelocInfo::JS_TO_WASM_CALL)
             : common()->RelocatableInt32Constant(static_cast<int>(address),
-                                                 RelocInfo::WASM_CALL));
+                                                 RelocInfo::JS_TO_WASM_CALL));
   }
 
   const compiler::Operator* IntPtrConstant(intptr_t value) {

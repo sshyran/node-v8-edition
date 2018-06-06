@@ -50,9 +50,9 @@ int ComputeCodeObjectSize(const CodeDesc& desc) {
   return object_size;
 }
 
-void InitializeCode(Handle<Code> code, int object_size, const CodeDesc& desc,
-                    Code::Kind kind, Handle<Object> self_ref,
-                    int32_t builtin_index,
+void InitializeCode(Heap* heap, Handle<Code> code, int object_size,
+                    const CodeDesc& desc, Code::Kind kind,
+                    Handle<Object> self_ref, int32_t builtin_index,
                     Handle<ByteArray> source_position_table,
                     Handle<DeoptimizationData> deopt_data,
                     Handle<ByteArray> reloc_info,
@@ -97,7 +97,7 @@ void InitializeCode(Handle<Code> code, int object_size, const CodeDesc& desc,
   // that are dereferenced during the copy to point directly to the actual heap
   // objects. These pointers can include references to the code object itself,
   // through the self_reference parameter.
-  code->CopyFromNoFlush(desc);
+  code->CopyFromNoFlush(heap, desc);
 
   code->clear_padding();
 
@@ -333,6 +333,10 @@ Handle<T> Factory::NewWeakFixedArrayWithMap(Heap::RootListIndex map_root_index,
 
 template Handle<FixedArray> Factory::NewFixedArrayWithMap<FixedArray>(
     Heap::RootListIndex, int, PretenureFlag);
+
+template Handle<DescriptorArray>
+Factory::NewWeakFixedArrayWithMap<DescriptorArray>(Heap::RootListIndex, int,
+                                                   PretenureFlag);
 
 Handle<FixedArray> Factory::NewFixedArray(int length, PretenureFlag pretenure) {
   DCHECK_LE(0, length);
@@ -2494,7 +2498,7 @@ MaybeHandle<Code> Factory::TryNewCode(
     result->set_map_after_allocation(*code_map(), SKIP_WRITE_BARRIER);
     code = handle(Code::cast(result), isolate());
 
-    InitializeCode(code, object_size, desc, kind, self_ref, builtin_index,
+    InitializeCode(heap, code, object_size, desc, kind, self_ref, builtin_index,
                    source_position_table, deopt_data, reloc_info,
                    data_container, stub_key, is_turbofanned, stack_slots,
                    safepoint_table_offset, handler_table_offset);
@@ -2542,7 +2546,7 @@ Handle<Code> Factory::NewCode(
     result->set_map_after_allocation(*code_map(), SKIP_WRITE_BARRIER);
     code = handle(Code::cast(result), isolate());
 
-    InitializeCode(code, object_size, desc, kind, self_ref, builtin_index,
+    InitializeCode(heap, code, object_size, desc, kind, self_ref, builtin_index,
                    source_position_table, deopt_data, reloc_info,
                    data_container, stub_key, is_turbofanned, stack_slots,
                    safepoint_table_offset, handler_table_offset);
@@ -2710,7 +2714,7 @@ Handle<JSGlobalObject> Factory::NewJSGlobalObject(
                       PropertyCellType::kMutable);
     Handle<Name> name(descs->GetKey(i));
     Handle<PropertyCell> cell = NewPropertyCell(name);
-    cell->set_value(descs->GetValue(i));
+    cell->set_value(descs->GetStrongValue(i));
     // |dictionary| already contains enough space for all properties.
     USE(GlobalDictionary::Add(dictionary, name, cell, d));
   }
@@ -3309,7 +3313,8 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForLiteral(
   Handle<SharedFunctionInfo> shared = NewSharedFunctionInfoForBuiltin(
       literal->name(), Builtins::kCompileLazy, kind);
   SharedFunctionInfo::InitFromFunctionLiteral(shared, literal, is_toplevel);
-  SharedFunctionInfo::SetScript(shared, script, false);
+  SharedFunctionInfo::SetScript(shared, script, literal->function_literal_id(),
+                                false);
   return shared;
 }
 
@@ -3397,7 +3402,6 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfo(
     share->set_script(*undefined_value(), SKIP_WRITE_BARRIER);
     share->set_debug_info(Smi::kZero, SKIP_WRITE_BARRIER);
     share->set_function_identifier(*undefined_value(), SKIP_WRITE_BARRIER);
-    share->set_function_literal_id(FunctionLiteral::kIdTypeInvalid);
 #if V8_SFI_HAS_UNIQUE_ID
     share->set_unique_id(isolate()->GetNextUniqueSharedFunctionInfoId());
 #endif

@@ -5,7 +5,6 @@
 #include "test/cctest/wasm/wasm-run-utils.h"
 
 #include "src/assembler-inl.h"
-#include "src/code-factory.h"
 #include "src/wasm/wasm-memory.h"
 #include "src/wasm/wasm-objects-inl.h"
 
@@ -48,8 +47,9 @@ TestingModuleBuilder::TestingModuleBuilder(
         maybe_import_index, test_module_->origin,
         trap_handler::IsTrapHandlerEnabled() ? kUseTrapHandler
                                              : kNoTrapHandler);
-    native_module_->ResizeCodeTableForTesting(maybe_import_index + 1,
-                                              kMaxFunctions);
+    if (native_module_->num_functions() <= maybe_import_index) {
+      native_module_->SetNumFunctionsForTesting(maybe_import_index + 1);
+    }
     auto wasm_to_js_wrapper = native_module_->AddCodeCopy(
         code, wasm::WasmCode::kWasmToJsWrapper, maybe_import_index);
 
@@ -99,8 +99,8 @@ uint32_t TestingModuleBuilder::AddFunction(FunctionSig* sig, const char* name) {
     test_module_->functions.reserve(kMaxFunctions);
   }
   uint32_t index = static_cast<uint32_t>(test_module_->functions.size());
-  if (native_module_) {
-    native_module_->ResizeCodeTableForTesting(index + 1, kMaxFunctions);
+  if (native_module_ && native_module_->num_functions() <= index) {
+    native_module_->SetNumFunctionsForTesting(index + 1);
   }
   test_module_->functions.push_back({sig, index, 0, {0, 0}, false, false});
   if (name) {
@@ -210,8 +210,9 @@ const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {
 Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
   Handle<SeqOneByteString> empty_string = Handle<SeqOneByteString>::cast(
       isolate_->factory()->NewStringFromOneByte({}).ToHandleChecked());
+  size_t module_size = 0;
   auto managed_module =
-      Managed<WasmModule>::FromSharedPtr(isolate_, test_module_);
+      Managed<WasmModule>::FromSharedPtr(isolate_, module_size, test_module_);
   DCHECK_EQ(test_module_ptr_, managed_module->raw());
   Handle<Script> script =
       isolate_->factory()->NewScript(isolate_->factory()->empty_string());
@@ -230,6 +231,7 @@ Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
   // have a memory yet, so we won't create it here. We'll update the
   // interpreter when we get a memory. We do have globals, though.
   native_module_ = compiled_module->GetNativeModule();
+  native_module_->ReserveCodeTableForTesting(kMaxFunctions);
 
   DCHECK(compiled_module->IsWasmCompiledModule());
   auto instance =
@@ -268,8 +270,7 @@ void TestBuildingGraph(Zone* zone, compiler::JSGraph* jsgraph,
                        ModuleEnv* module, FunctionSig* sig,
                        compiler::SourcePositionTable* source_position_table,
                        const byte* start, const byte* end) {
-  compiler::WasmGraphBuilder builder(jsgraph->isolate(), module, zone, jsgraph,
-                                     CodeFactory::CEntry(jsgraph->isolate(), 1),
+  compiler::WasmGraphBuilder builder(module, zone, jsgraph,
                                      sig, source_position_table);
   TestBuildingGraphWithBuilder(&builder, zone, sig, start, end);
 }
@@ -433,8 +434,7 @@ void WasmFunctionCompiler::Build(const byte* start, const byte* end) {
           ? WasmCompilationUnit::CompilationMode::kLiftoff
           : WasmCompilationUnit::CompilationMode::kTurbofan;
   WasmCompilationUnit unit(isolate(), &module_env, native_module, func_body,
-                           func_name, function_->func_index,
-                           CodeFactory::CEntry(isolate(), 1), comp_mode,
+                           func_name, function_->func_index, comp_mode,
                            isolate()->counters(), builder_->lower_simd());
   unit.ExecuteCompilation();
   wasm::WasmCode* wasm_code = unit.FinishCompilation(&thrower);

@@ -386,18 +386,16 @@ unsigned Operand::shift_amount() const {
 
 
 Operand Operand::UntagSmi(Register smi) {
-  STATIC_ASSERT(kXRegSizeInBits == static_cast<unsigned>(kSmiShift +
-                                                         kSmiValueSize));
   DCHECK(smi.Is64Bits());
+  DCHECK(SmiValuesAre32Bits() || SmiValuesAre31Bits());
   return Operand(smi, ASR, kSmiShift);
 }
 
 
 Operand Operand::UntagSmiAndScale(Register smi, int scale) {
-  STATIC_ASSERT(kXRegSizeInBits == static_cast<unsigned>(kSmiShift +
-                                                         kSmiValueSize));
   DCHECK(smi.Is64Bits());
   DCHECK((scale >= 0) && (scale <= (64 - kSmiValueSize)));
+  DCHECK(SmiValuesAre32Bits() || SmiValuesAre31Bits());
   if (scale > kSmiShift) {
     return Operand(smi, LSL, scale - kSmiShift);
   } else if (scale < kSmiShift) {
@@ -708,7 +706,7 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   }
 }
 
-void RelocInfo::set_target_object(HeapObject* target,
+void RelocInfo::set_target_object(Heap* heap, HeapObject* target,
                                   WriteBarrierMode write_barrier_mode,
                                   ICacheFlushMode icache_flush_mode) {
   DCHECK(IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT);
@@ -716,9 +714,8 @@ void RelocInfo::set_target_object(HeapObject* target,
                                    reinterpret_cast<Address>(target),
                                    icache_flush_mode);
   if (write_barrier_mode == UPDATE_WRITE_BARRIER && host() != nullptr) {
-    host()->GetHeap()->incremental_marking()->RecordWriteIntoCode(host(), this,
-                                                                  target);
-    host()->GetHeap()->RecordWriteIntoCode(host(), this, target);
+    heap->incremental_marking()->RecordWriteIntoCode(host(), this, target);
+    heap->RecordWriteIntoCode(host(), this, target);
   }
 }
 

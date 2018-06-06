@@ -88,16 +88,6 @@ const Register FastNewObjectDescriptor::NewTargetRegister() {
   return kJavaScriptCallNewTargetRegister;
 }
 
-void FastNewArgumentsDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  Register registers[] = {TargetRegister()};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-const Register FastNewArgumentsDescriptor::TargetRegister() {
-  return kJSFunctionRegister;
-}
-
 void RecordWriteDescriptor::InitializePlatformIndependent(
     CallInterfaceDescriptorData* data) {
   MachineType machine_types[] = {MachineType::TaggedPointer(),
@@ -231,29 +221,6 @@ void StoreTransitionDescriptor::InitializePlatformIndependent(
                                       machine_types);
 }
 
-void StoreNamedTransitionDescriptor::InitializePlatformIndependent(
-    CallInterfaceDescriptorData* data) {
-  // kReceiver, kFieldOffset, kMap, kValue, kSlot, kVector, kName
-  MachineType machine_types[] = {
-      MachineType::AnyTagged(),    MachineType::TaggedSigned(),
-      MachineType::AnyTagged(),    MachineType::AnyTagged(),
-      MachineType::TaggedSigned(), MachineType::AnyTagged(),
-      MachineType::AnyTagged()};
-  data->InitializePlatformIndependent(arraysize(machine_types), 0,
-                                      machine_types);
-}
-
-void StoreNamedTransitionDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  Register registers[] = {
-      ReceiverRegister(), FieldOffsetRegister(), MapRegister(),
-      ValueRegister(),    SlotRegister(),        VectorRegister(),
-      NameRegister(),
-  };
-  int len = arraysize(registers) - kStackArgumentsCount;
-  data->InitializePlatformSpecific(len, registers);
-}
-
 void StringAtDescriptor::InitializePlatformIndependent(
     CallInterfaceDescriptorData* data) {
   // kReceiver, kPosition
@@ -298,18 +265,6 @@ void TypeConversionStackParameterDescriptor::InitializePlatformSpecific(
 void TypeConversionStackParameterDescriptor::InitializePlatformIndependent(
     CallInterfaceDescriptorData* data) {
   data->InitializePlatformIndependent(data->register_param_count(), 1, nullptr);
-}
-
-void MathPowTaggedDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  Register registers[] = {exponent()};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-void MathPowIntegerDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  Register registers[] = {exponent()};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 void LoadWithVectorDescriptor::InitializePlatformIndependent(

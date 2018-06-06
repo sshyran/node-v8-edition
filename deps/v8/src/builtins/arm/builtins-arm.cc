@@ -495,8 +495,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
 
   // Copy the function arguments from the generator object's register file.
   __ ldr(r3, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
-  __ ldr(r3,
-         FieldMemOperand(r3, SharedFunctionInfo::kFormalParameterCountOffset));
+  __ ldrh(r3,
+          FieldMemOperand(r3, SharedFunctionInfo::kFormalParameterCountOffset));
   __ ldr(r2,
          FieldMemOperand(r1, JSGeneratorObject::kParametersAndRegistersOffset));
   {
@@ -527,8 +527,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   // Resume (Ignition/TurboFan) generator object.
   {
     __ ldr(r0, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
-    __ ldr(r0, FieldMemOperand(
-                   r0, SharedFunctionInfo::kFormalParameterCountOffset));
+    __ ldrh(r0, FieldMemOperand(
+                    r0, SharedFunctionInfo::kFormalParameterCountOffset));
     // We abuse new.target both to indicate that this is a resume call and to
     // pass in the generator object.  In ordinary calls, new.target is always
     // undefined because generator functions are non-constructable.
@@ -1981,8 +1981,8 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
   {
     __ ldr(r5, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
     __ ldr(r5, FieldMemOperand(r5, JSFunction::kSharedFunctionInfoOffset));
-    __ ldr(r5, FieldMemOperand(
-                   r5, SharedFunctionInfo::kFormalParameterCountOffset));
+    __ ldrh(r5, FieldMemOperand(
+                    r5, SharedFunctionInfo::kFormalParameterCountOffset));
     __ mov(r4, fp);
   }
   __ b(&arguments_done);
@@ -2112,8 +2112,8 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   //  -- cp : the function context.
   // -----------------------------------
 
-  __ ldr(r2,
-         FieldMemOperand(r2, SharedFunctionInfo::kFormalParameterCountOffset));
+  __ ldrh(r2,
+          FieldMemOperand(r2, SharedFunctionInfo::kFormalParameterCountOffset));
   ParameterCount actual(r0);
   ParameterCount expected(r2);
   __ InvokeFunctionCode(r1, no_reg, expected, actual, JUMP_FUNCTION);
@@ -2429,10 +2429,10 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
   Label invoke, dont_adapt_arguments, stack_overflow;
 
   Label enough, too_few;
-  __ cmp(r0, r2);
-  __ b(lt, &too_few);
   __ cmp(r2, Operand(SharedFunctionInfo::kDontAdaptArgumentsSentinel));
   __ b(eq, &dont_adapt_arguments);
+  __ cmp(r0, r2);
+  __ b(lt, &too_few);
 
   Register scratch = r5;
 
@@ -2834,20 +2834,20 @@ void Builtins::Generate_DoubleToI(MacroAssembler* masm) {
 }
 
 void Builtins::Generate_MathPowInternal(MacroAssembler* masm) {
-  const Register exponent = MathPowTaggedDescriptor::exponent();
-  DCHECK(exponent == r2);
   const LowDwVfpRegister double_base = d0;
   const LowDwVfpRegister double_exponent = d1;
   const LowDwVfpRegister double_result = d2;
   const LowDwVfpRegister double_scratch = d3;
   const SwVfpRegister single_scratch = s6;
-  const Register scratch = r9;
-  const Register scratch2 = r4;
+  // Avoid using Registers r0-r3 as they may be needed when calling to C if the
+  // ABI is softfloat.
+  const Register integer_exponent = r4;
+  const Register scratch = r5;
 
   Label call_runtime, done, int_exponent;
 
   // Detect integer exponents stored as double.
-  __ TryDoubleToInt32Exact(scratch, double_exponent, double_scratch);
+  __ TryDoubleToInt32Exact(integer_exponent, double_exponent, double_scratch);
   __ b(eq, &int_exponent);
 
   __ push(lr);
@@ -2864,16 +2864,13 @@ void Builtins::Generate_MathPowInternal(MacroAssembler* masm) {
   // Calculate power with integer exponent.
   __ bind(&int_exponent);
 
-  // Get two copies of exponent in the registers scratch and exponent.
-  // Exponent has previously been stored into scratch as untagged integer.
-  __ mov(exponent, scratch);
-
   __ vmov(double_scratch, double_base);  // Back up base.
-  __ vmov(double_result, Double(1.0), scratch2);
+  __ vmov(double_result, Double(1.0), scratch);
 
   // Get absolute value of exponent.
-  __ cmp(scratch, Operand::Zero());
-  __ rsb(scratch, scratch, Operand::Zero(), LeaveCC, mi);
+  __ cmp(integer_exponent, Operand::Zero());
+  __ mov(scratch, integer_exponent);
+  __ rsb(scratch, integer_exponent, Operand::Zero(), LeaveCC, mi);
 
   Label while_true;
   __ bind(&while_true);
@@ -2882,7 +2879,7 @@ void Builtins::Generate_MathPowInternal(MacroAssembler* masm) {
   __ vmul(double_scratch, double_scratch, double_scratch, ne);
   __ b(ne, &while_true);
 
-  __ cmp(exponent, Operand::Zero());
+  __ cmp(integer_exponent, Operand::Zero());
   __ b(ge, &done);
   __ vmov(double_scratch, Double(1.0), scratch);
   __ vdiv(double_result, double_scratch, double_result);
@@ -2892,7 +2889,7 @@ void Builtins::Generate_MathPowInternal(MacroAssembler* masm) {
   __ b(ne, &done);
   // double_exponent may not containe the exponent value if the input was a
   // smi.  We set it with exponent value before bailing out.
-  __ vmov(single_scratch, exponent);
+  __ vmov(single_scratch, integer_exponent);
   __ vcvt_f64_s32(double_exponent, single_scratch);
 
   // Returning or bailing out.

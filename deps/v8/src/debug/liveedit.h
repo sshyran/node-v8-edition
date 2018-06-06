@@ -85,11 +85,13 @@ class LiveEdit : AllStatic {
   static void FixupScript(Handle<Script> script, int max_function_literal_id);
 
   static void FunctionSourceUpdated(Handle<JSArray> shared_info_array,
+                                    Handle<Script> script,
                                     int new_function_literal_id);
 
   // Updates script field in FunctionSharedInfo.
   static void SetFunctionScript(Handle<JSValue> function_wrapper,
-                                Handle<Object> script_handle);
+                                Handle<Object> script_handle,
+                                int function_literal_id);
 
   static void PatchFunctionPositions(Handle<JSArray> shared_info_array,
                                      Handle<JSArray> position_change_array);
@@ -103,7 +105,8 @@ class LiveEdit : AllStatic {
 
   // In a code of a parent function replaces original function as embedded
   // object with a substitution one.
-  static void ReplaceRefToNestedFunction(Handle<JSValue> parent_function_shared,
+  static void ReplaceRefToNestedFunction(Heap* heap,
+                                         Handle<JSValue> parent_function_shared,
                                          Handle<JSValue> orig_function_shared,
                                          Handle<JSValue> subst_function_shared);
 

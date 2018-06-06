@@ -71,7 +71,6 @@ class BigIntObject;
 class Boolean;
 class BooleanObject;
 class Context;
-class CpuProfiler;
 class Data;
 class Date;
 class External;
@@ -176,18 +175,18 @@ const int kSmiTag = 0;
 const int kSmiTagSize = 1;
 const intptr_t kSmiTagMask = (1 << kSmiTagSize) - 1;
 
-template <size_t ptr_size>
+template <size_t tagged_ptr_size>
 struct SmiTagging;
 
 template <int kSmiShiftSize>
 V8_INLINE internal::Object* IntToSmi(int value) {
   int smi_shift_bits = kSmiTagSize + kSmiShiftSize;
-  uintptr_t tagged_value =
-      (static_cast<uintptr_t>(value) << smi_shift_bits) | kSmiTag;
+  intptr_t tagged_value =
+      (static_cast<intptr_t>(value) << smi_shift_bits) | kSmiTag;
   return reinterpret_cast<internal::Object*>(tagged_value);
 }
 
-// Smi constants for 32-bit systems.
+// Smi constants for systems where tagged pointer is a 32-bit value.
 template <>
 struct SmiTagging<4> {
   enum { kSmiShiftSize = 0, kSmiValueSize = 31 };
@@ -217,7 +216,7 @@ struct SmiTagging<4> {
   }
 };
 
-// Smi constants for 64-bit systems.
+// Smi constants for systems where tagged pointer is a 64-bit value.
 template <>
 struct SmiTagging<8> {
   enum { kSmiShiftSize = 31, kSmiValueSize = 32 };
@@ -237,7 +236,15 @@ struct SmiTagging<8> {
   }
 };
 
+#if V8_COMPRESS_POINTERS
+static_assert(
+    kApiPointerSize == kApiInt64Size,
+    "Pointer compression can be enabled only for 64-bit architectures");
+typedef SmiTagging<4> PlatformSmiTagging;
+#else
 typedef SmiTagging<kApiPointerSize> PlatformSmiTagging;
+#endif
+
 const int kSmiShiftSize = PlatformSmiTagging::kSmiShiftSize;
 const int kSmiValueSize = PlatformSmiTagging::kSmiValueSize;
 const int kSmiMinValue = (static_cast<unsigned int>(-1)) << (kSmiValueSize - 1);
@@ -7527,15 +7534,7 @@ class V8_EXPORT Isolate {
   HeapProfiler* GetHeapProfiler();
 
   /**
-   * Returns CPU profiler for this isolate. Will return NULL unless the isolate
-   * is initialized. It is the embedder's responsibility to stop all CPU
-   * profiling activities if it has started any.
-   */
-  V8_DEPRECATED("CpuProfiler should be created with CpuProfiler::New call.",
-                CpuProfiler* GetCpuProfiler());
-
-  /**
-   * Tells the CPU profiler whether the embedder is idle.
+   * Tells the VM whether the embedder is idle or not.
    */
   void SetIdle(bool is_idle);
 
@@ -7613,6 +7612,87 @@ class V8_EXPORT Isolate {
    * Sets the embedder heap tracer for the isolate.
    */
   void SetEmbedderHeapTracer(EmbedderHeapTracer* tracer);
+
+  /**
+   * Use for |AtomicsWaitCallback| to indicate the type of event it receives.
+   */
+  enum class AtomicsWaitEvent {
+    /** Indicates that this call is happening before waiting. */
+    kStartWait,
+    /** `Atomics.wait()` finished because of an `Atomics.wake()` call. */
+    kWokenUp,
+    /** `Atomics.wait()` finished because it timed out. */
+    kTimedOut,
+    /** `Atomics.wait()` was interrupted through |TerminateExecution()|. */
+    kTerminatedExecution,
+    /** `Atomics.wait()` was stopped through |AtomicsWaitWakeHandle|. */
+    kAPIStopped
+  };
+
+  /**
+   * Passed to |AtomicsWaitCallback| as a means of stopping an ongoing
+   * `Atomics.wait` call.
+   */
+  class V8_EXPORT AtomicsWaitWakeHandle {
+   public:
+    /**
+     * Stop this `Atomics.wait()` call and call the |AtomicsWaitCallback|
+     * with |kAPIStopped|.
+     *
+     * This function may be called from another thread. The caller has to ensure
+     * through proper synchronization that it is not called after
+     * the finishing |AtomicsWaitCallback|.
+     *
+     * Note that the ECMAScript specification does not plan for the possibility
+     * of wakeups that are neither coming from a timeout or an `Atomics.wake()`
+     * call, so this may invalidate assumptions made by existing code.
+     * The embedder may accordingly wish to schedule an exception in the
+     * finishing |AtomicsWaitCallback|.
+     */
+    void Wake();
+  };
+
+  /**
+   * Embedder callback for `Atomics.wait()` that can be added through
+   * |SetAtomicsWaitCallback|.
+   *
+   * This will be called just before starting to wait with the |event| value
+   * |kStartWait| and after finishing waiting with one of the other
+   * values of |AtomicsWaitEvent| inside of an `Atomics.wait()` call.
+   *
+   * |array_buffer| will refer to the underlying SharedArrayBuffer,
+   * |offset_in_bytes| to the location of the waited-on memory address inside
+   * the SharedArrayBuffer.
+   *
+   * |value| and |timeout_in_ms| will be the values passed to
+   * the `Atomics.wait()` call. If no timeout was used, |timeout_in_ms|
+   * will be `INFINITY`.
+   *
+   * In the |kStartWait| callback, |stop_handle| will be an object that
+   * is only valid until the corresponding finishing callback and that
+   * can be used to stop the wait process while it is happening.
+   *
+   * This callback may schedule exceptions, *unless* |event| is equal to
+   * |kTerminatedExecution|.
+   *
+   * This callback is not called if |value| did not match the expected value
+   * inside the SharedArrayBuffer and `Atomics.wait()` returns immediately
+   * because of that.
+   */
+  typedef void (*AtomicsWaitCallback)(AtomicsWaitEvent event,
+                                      Local<SharedArrayBuffer> array_buffer,
+                                      size_t offset_in_bytes, int32_t value,
+                                      double timeout_in_ms,
+                                      AtomicsWaitWakeHandle* stop_handle,
+                                      void* data);
+
+  /**
+   * Set a new |AtomicsWaitCallback|. This overrides an earlier
+   * |AtomicsWaitCallback|, if there was any. If |callback| is nullptr,
+   * this unsets the callback. |data| will be passed to the callback
+   * as its last parameter.
+   */
+  void SetAtomicsWaitCallback(AtomicsWaitCallback callback, void* data);
 
   /**
    * Enables the host application to receive a notification after a
@@ -9199,6 +9279,7 @@ class Internals {
   static const int kNodeStateIsWeakValue = 2;
   static const int kNodeStateIsPendingValue = 3;
   static const int kNodeStateIsNearDeathValue = 4;
+  static const int kNodeIsIndependentShift = 3;
   static const int kNodeIsActiveShift = 4;
 
   static const int kFirstNonstringType = 0x80;
@@ -9422,7 +9503,10 @@ void Persistent<T, M>::Copy(const Persistent<S, M2>& that) {
 
 template <class T>
 bool PersistentBase<T>::IsIndependent() const {
-  return true;
+  typedef internal::Internals I;
+  if (this->IsEmpty()) return false;
+  return I::GetNodeFlag(reinterpret_cast<internal::Object**>(this->val_),
+                        I::kNodeIsIndependentShift);
 }
 
 template <class T>
@@ -9511,7 +9595,12 @@ void PersistentBase<T>::RegisterExternalReference(Isolate* isolate) const {
 }
 
 template <class T>
-void PersistentBase<T>::MarkIndependent() {}
+void PersistentBase<T>::MarkIndependent() {
+  typedef internal::Internals I;
+  if (this->IsEmpty()) return;
+  I::UpdateNodeFlag(reinterpret_cast<internal::Object**>(this->val_), true,
+                    I::kNodeIsIndependentShift);
+}
 
 template <class T>
 void PersistentBase<T>::MarkActive() {

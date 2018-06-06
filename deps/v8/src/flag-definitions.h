@@ -232,11 +232,7 @@ DEFINE_IMPLICATION(harmony_class_fields, harmony_private_fields)
 #define HARMONY_SHIPPING(V)                                                   \
   V(harmony_string_trimming, "harmony String.prototype.trim{Start,End}")      \
   V(harmony_sharedarraybuffer, "harmony sharedarraybuffer")                   \
-  V(harmony_regexp_named_captures, "harmony regexp named captures")           \
-  V(harmony_regexp_property, "harmony Unicode regexp property classes")       \
   V(harmony_function_tostring, "harmony Function.prototype.toString")         \
-  V(harmony_promise_finally, "harmony Promise.prototype.finally")             \
-  V(harmony_optional_catch_binding, "allow omitting binding in catch blocks") \
   V(harmony_import_meta, "harmony import.meta property")                      \
   V(harmony_bigint, "harmony arbitrary precision integers")                   \
   V(harmony_dynamic_import, "harmony dynamic import")                         \
@@ -338,7 +334,7 @@ DEFINE_BOOL(ignition_elide_noneffectful_bytecodes, true,
 DEFINE_BOOL(ignition_reo, true, "use ignition register equivalence optimizer")
 DEFINE_BOOL(ignition_filter_expression_positions, true,
             "filter expression positions before the bytecode pipeline")
-DEFINE_BOOL(ignition_share_named_property_feedback, false,
+DEFINE_BOOL(ignition_share_named_property_feedback, true,
             "share feedback slots when loading the same named property from "
             "the same object")
 DEFINE_BOOL(print_bytecode, false,
@@ -587,7 +583,7 @@ DEFINE_BOOL(experimental_wasm_threads, false,
             "enable prototype threads for wasm")
 DEFINE_BOOL(experimental_wasm_sat_f2i_conversions, false,
             "enable non-trapping float-to-int conversions for wasm")
-DEFINE_BOOL(experimental_wasm_se, false,
+DEFINE_BOOL(experimental_wasm_se, true,
             "enable prototype sign extension opcodes for wasm")
 DEFINE_BOOL(experimental_wasm_anyref, false,
             "enable prototype anyref support for wasm")

@@ -80,13 +80,6 @@ RUNTIME_FUNCTION(Runtime_FunctionGetScriptSourcePosition) {
   return Smi::FromInt(pos);
 }
 
-RUNTIME_FUNCTION(Runtime_FunctionGetContextData) {
-  SealHandleScope shs(isolate);
-  DCHECK_EQ(1, args.length());
-
-  CONVERT_ARG_CHECKED(JSFunction, fun, 0);
-  return fun->native_context()->debug_context_id();
-}
 
 RUNTIME_FUNCTION(Runtime_FunctionIsAPIFunction) {
   SealHandleScope shs(isolate);
@@ -126,16 +119,17 @@ RUNTIME_FUNCTION(Runtime_SetCode) {
   bool was_native = target_shared->native();
   target_shared->set_flags(source_shared->flags());
   target_shared->set_native(was_native);
-  target_shared->set_function_literal_id(source_shared->function_literal_id());
-
   target_shared->set_scope_info(source_shared->scope_info());
 
   Handle<Object> source_script(source_shared->script(), isolate);
+  int function_literal_id = source_shared->GetFunctionLiteralId(isolate);
   if (source_script->IsScript()) {
     SharedFunctionInfo::SetScript(source_shared,
-                                  isolate->factory()->undefined_value());
+                                  isolate->factory()->undefined_value(),
+                                  function_literal_id);
   }
-  SharedFunctionInfo::SetScript(target_shared, source_script);
+  SharedFunctionInfo::SetScript(target_shared, source_script,
+                                function_literal_id);
 
   // Set the code of the target function.
   target->set_code(source_shared->GetCode());
@@ -150,7 +144,7 @@ RUNTIME_FUNCTION(Runtime_SetCode) {
   if (isolate->logger()->is_listening_to_code_events() ||
       isolate->is_profiling()) {
     isolate->logger()->LogExistingFunction(
-        source_shared, Handle<AbstractCode>(source_shared->abstract_code()));
+        source_shared, handle(source_shared->abstract_code(), isolate));
   }
 
   return *target;
@@ -204,16 +198,6 @@ RUNTIME_FUNCTION(Runtime_IsFunction) {
   return isolate->heap()->ToBoolean(object->IsFunction());
 }
 
-
-RUNTIME_FUNCTION(Runtime_FunctionToString) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  CONVERT_ARG_HANDLE_CHECKED(JSReceiver, function, 0);
-  return function->IsJSBoundFunction()
-             ? *JSBoundFunction::ToString(
-                   Handle<JSBoundFunction>::cast(function))
-             : *JSFunction::ToString(Handle<JSFunction>::cast(function));
-}
 
 }  // namespace internal
 }  // namespace v8

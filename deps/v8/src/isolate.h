@@ -68,7 +68,6 @@ class CompilerDispatcher;
 class ContextSlotCache;
 class Counters;
 class CpuFeatures;
-class CpuProfiler;
 class Debug;
 class DeoptimizerData;
 class DescriptorLookupCache;
@@ -766,6 +765,13 @@ class Isolate : private HiddenFactory {
   }
   debug::ConsoleDelegate* console_delegate() { return console_delegate_; }
 
+  void set_async_event_delegate(debug::AsyncEventDelegate* delegate) {
+    async_event_delegate_ = delegate;
+    PromiseHookStateUpdated();
+  }
+  void OnAsyncFunctionStateChanged(Handle<JSPromise> promise,
+                                   debug::DebugAsyncActionType);
+
   // Re-throw an exception.  This involves no error reporting since error
   // reporting was handled when the exception was thrown originally.
   Object* ReThrow(Object* exception);
@@ -1238,8 +1244,16 @@ class Isolate : private HiddenFactory {
   int GetNextUniqueSharedFunctionInfoId() { return next_unique_sfi_id_++; }
 #endif
 
-  Address promise_hook_or_debug_is_active_address() {
-    return reinterpret_cast<Address>(&promise_hook_or_debug_is_active_);
+  Address promise_hook_address() {
+    return reinterpret_cast<Address>(&promise_hook_);
+  }
+
+  Address async_event_delegate_address() {
+    return reinterpret_cast<Address>(&async_event_delegate_);
+  }
+
+  Address promise_hook_or_async_event_delegate_address() {
+    return reinterpret_cast<Address>(&promise_hook_or_async_event_delegate_);
   }
 
   Address pending_microtask_count_address() {
@@ -1254,7 +1268,13 @@ class Isolate : private HiddenFactory {
     return reinterpret_cast<Address>(&debug_execution_mode_);
   }
 
-  void DebugStateUpdated();
+  void SetAtomicsWaitCallback(v8::Isolate::AtomicsWaitCallback callback,
+                              void* data);
+  void RunAtomicsWaitCallback(v8::Isolate::AtomicsWaitEvent event,
+                              Handle<JSArrayBuffer> array_buffer,
+                              size_t offset_in_bytes, int32_t value,
+                              double timeout_in_ms,
+                              AtomicsWaitWakeHandle* stop_handle);
 
   void SetPromiseHook(PromiseHook hook);
   void RunPromiseHook(PromiseHookType type, Handle<JSPromise> promise,
@@ -1483,6 +1503,10 @@ class Isolate : private HiddenFactory {
 
   void SetTerminationOnExternalTryCatch();
 
+  void PromiseHookStateUpdated();
+  void RunPromiseHookForAsyncEventDelegate(PromiseHookType type,
+                                           Handle<JSPromise> promise);
+
   const char* RAILModeName(RAILMode rail_mode) const {
     switch (rail_mode) {
       case PERFORMANCE_RESPONSE:
@@ -1496,10 +1520,6 @@ class Isolate : private HiddenFactory {
     }
     return "";
   }
-
-  // TODO(alph): Remove along with the deprecated GetCpuProfiler().
-  friend v8::CpuProfiler* v8::Isolate::GetCpuProfiler();
-  CpuProfiler* EnsureCpuProfiler();
 
   base::Atomic32 id_;
   EntryStackItem* entry_stack_;
@@ -1546,7 +1566,8 @@ class Isolate : private HiddenFactory {
   base::RandomNumberGenerator* random_number_generator_;
   base::RandomNumberGenerator* fuzzer_rng_;
   base::AtomicValue<RAILMode> rail_mode_;
-  bool promise_hook_or_debug_is_active_;
+  v8::Isolate::AtomicsWaitCallback atomics_wait_callback_;
+  void* atomics_wait_callback_data_;
   PromiseHook promise_hook_;
   HostImportModuleDynamicallyCallback host_import_module_dynamically_callback_;
   HostInitializeImportMetaObjectCallback
@@ -1584,7 +1605,6 @@ class Isolate : private HiddenFactory {
 #endif
 
   Debug* debug_;
-  CpuProfiler* cpu_profiler_;
   HeapProfiler* heap_profiler_;
   std::unique_ptr<CodeEventDispatcher> code_event_dispatcher_;
   FunctionEntryHook function_entry_hook_;
@@ -1666,6 +1686,10 @@ class Isolate : private HiddenFactory {
   CancelableTaskManager* cancelable_task_manager_;
 
   debug::ConsoleDelegate* console_delegate_ = nullptr;
+
+  debug::AsyncEventDelegate* async_event_delegate_ = nullptr;
+  bool promise_hook_or_async_event_delegate_ = false;
+  int async_task_count_ = 0;
 
   v8::Isolate::AbortOnUncaughtExceptionCallback
       abort_on_uncaught_exception_callback_;

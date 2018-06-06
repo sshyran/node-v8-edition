@@ -163,7 +163,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   // This only deserializes the scope chain, but doesn't connect the scopes to
   // their corresponding scope infos. Therefore, looking up variables in the
   // deserialized scopes is not possible.
-  void DeserializeScopeChain(ParseInfo* info,
+  void DeserializeScopeChain(Isolate* isolate, ParseInfo* info,
                              MaybeHandle<ScopeInfo> maybe_outer_scope_info);
 
   // Move statistics to Isolate
@@ -247,7 +247,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
       SET_ALLOW(harmony_dynamic_import);
       SET_ALLOW(harmony_import_meta);
       SET_ALLOW(harmony_bigint);
-      SET_ALLOW(harmony_optional_catch_binding);
       SET_ALLOW(harmony_private_fields);
       SET_ALLOW(eval_cache);
 #undef SET_ALLOW

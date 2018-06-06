@@ -4121,19 +4121,37 @@ bool TurboAssembler::BranchAndLinkShortCheck(int32_t offset, Label* L,
 
 #ifdef V8_EMBEDDED_BUILTINS
 void TurboAssembler::LookupConstant(Register destination,
-                                    Handle<Object> object) {
+                                    Handle<HeapObject> object) {
   CHECK(isolate()->ShouldLoadConstantsFromRootList());
   CHECK(root_array_available_);
+
+  // Before falling back to the (fairly slow) lookup from the constants table,
+  // check if any of the fast paths can be applied.
+  {
+    int builtin_index;
+    Heap::RootListIndex root_index;
+    if (isolate()->heap()->IsRootHandle(object, &root_index)) {
+      // Roots are loaded relative to the root register.
+      LoadRoot(destination, root_index);
+      return;
+    } else if (isolate()->builtins()->IsBuiltinHandle(object, &builtin_index)) {
+      // Similar to roots, builtins may be loaded from the builtins table.
+      LoadBuiltin(destination, builtin_index);
+      return;
+    } else if (object.is_identical_to(code_object_) &&
+               Builtins::IsBuiltinId(maybe_builtin_index_)) {
+      // The self-reference loaded through Codevalue() may also be a builtin
+      // and thus viable for a fast load.
+      LoadBuiltin(destination, maybe_builtin_index_);
+      return;
+    }
+  }
 
   // Ensure the given object is in the builtins constants table and fetch its
   // index.
   BuiltinsConstantsTableBuilder* builder =
       isolate()->builtins_constants_table_builder();
   uint32_t index = builder->AddObject(object);
-
-  // TODO(jgruber): Load builtins from the builtins table.
-  // TODO(jgruber): Ensure that code generation can recognize constant targets
-  // in kArchCallCodeObject.
 
   DCHECK(isolate()->heap()->RootCanBeTreatedAsConstant(
       Heap::kBuiltinsConstantsTableRootIndex));
@@ -4165,6 +4183,15 @@ void TurboAssembler::LookupExternalReference(Register destination,
 
   Ld(destination,
      MemOperand(kRootRegister, roots_to_external_reference_offset));
+}
+
+void TurboAssembler::LoadBuiltin(Register destination, int builtin_index) {
+  DCHECK(Builtins::IsBuiltinId(builtin_index));
+
+  int32_t roots_to_builtins_offset =
+      Heap::roots_to_builtins_offset() + builtin_index * kPointerSize;
+
+  Ld(destination, MemOperand(kRootRegister, roots_to_builtins_offset));
 }
 #endif  // V8_EMBEDDED_BUILTINS
 
@@ -4806,11 +4833,10 @@ void MacroAssembler::InvokeFunction(Register function, Register new_target,
   Register temp_reg = t0;
   Ld(temp_reg, FieldMemOperand(a1, JSFunction::kSharedFunctionInfoOffset));
   Ld(cp, FieldMemOperand(a1, JSFunction::kContextOffset));
-  // The argument count is stored as int32_t on 64-bit platforms.
-  // TODO(plind): Smi on 32-bit platforms.
-  Lw(expected_reg,
-     FieldMemOperand(temp_reg,
-                     SharedFunctionInfo::kFormalParameterCountOffset));
+  // The argument count is stored as uint16_t
+  Lhu(expected_reg,
+      FieldMemOperand(temp_reg,
+                      SharedFunctionInfo::kFormalParameterCountOffset));
   ParameterCount expected(expected_reg);
   InvokeFunctionCode(a1, new_target, expected, actual, flag);
 }
@@ -5131,14 +5157,8 @@ void TurboAssembler::StubPrologue(StackFrame::Type type) {
 void TurboAssembler::Prologue() { PushStandardFrame(a1); }
 
 void TurboAssembler::EnterFrame(StackFrame::Type type) {
-  int stack_offset, fp_offset;
-  if (type == StackFrame::INTERNAL) {
-    stack_offset = -4 * kPointerSize;
-    fp_offset = 2 * kPointerSize;
-  } else {
-    stack_offset = -3 * kPointerSize;
-    fp_offset = 1 * kPointerSize;
-  }
+  int stack_offset = -3 * kPointerSize;
+  const int fp_offset = 1 * kPointerSize;
   daddiu(sp, sp, stack_offset);
   stack_offset = -stack_offset - kPointerSize;
   Sd(ra, MemOperand(sp, stack_offset));
@@ -5147,12 +5167,8 @@ void TurboAssembler::EnterFrame(StackFrame::Type type) {
   stack_offset -= kPointerSize;
   li(t9, Operand(StackFrame::TypeToMarker(type)));
   Sd(t9, MemOperand(sp, stack_offset));
-  if (type == StackFrame::INTERNAL) {
-    DCHECK_EQ(stack_offset, kPointerSize);
-  } else {
-    DCHECK_EQ(stack_offset, 0);
-  }
   // Adjust FP to point to saved FP.
+  DCHECK_EQ(stack_offset, 0);
   Daddu(fp, sp, Operand(fp_offset));
 }
 
@@ -5348,6 +5364,7 @@ void TurboAssembler::SmiUntag(Register dst, const MemOperand& src) {
   if (SmiValuesAre32Bits()) {
     Lw(dst, MemOperand(src.rm(), SmiWordOffset(src.offset())));
   } else {
+    DCHECK(SmiValuesAre31Bits());
     Lw(dst, src);
     SmiUntag(dst);
   }

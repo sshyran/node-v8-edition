@@ -8064,13 +8064,6 @@ HeapProfiler* Isolate::GetHeapProfiler() {
   return reinterpret_cast<HeapProfiler*>(heap_profiler);
 }
 
-
-CpuProfiler* Isolate::GetCpuProfiler() {
-  i::CpuProfiler* cpu_profiler =
-      reinterpret_cast<i::Isolate*>(this)->EnsureCpuProfiler();
-  return reinterpret_cast<CpuProfiler*>(cpu_profiler);
-}
-
 void Isolate::SetIdle(bool is_idle) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
   isolate->SetIdle(is_idle);
@@ -8603,6 +8596,15 @@ void Isolate::RemoveCallCompletedCallback(
       reinterpret_cast<CallCompletedCallback>(callback));
 }
 
+void Isolate::AtomicsWaitWakeHandle::Wake() {
+  reinterpret_cast<i::AtomicsWaitWakeHandle*>(this)->Wake();
+}
+
+void Isolate::SetAtomicsWaitCallback(AtomicsWaitCallback callback, void* data) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  isolate->SetAtomicsWaitCallback(callback, data);
+}
+
 void Isolate::SetPromiseHook(PromiseHook hook) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
   isolate->SetPromiseHook(hook);
@@ -9107,41 +9109,19 @@ v8_inspector::V8Inspector* debug::GetInspector(Isolate* isolate) {
   return reinterpret_cast<i::Isolate*>(isolate)->inspector();
 }
 
-Local<Context> debug::GetDebugContext(Isolate* isolate) {
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  return Utils::ToLocal(i_isolate->debug()->GetDebugContext());
-}
-
-MaybeLocal<Value> debug::Call(Local<Context> context,
-                              v8::Local<v8::Function> fun,
-                              v8::Local<v8::Value> data) {
-  PREPARE_FOR_EXECUTION(context, Debug, Call, Value);
-  i::Handle<i::Object> data_obj;
-  if (data.IsEmpty()) {
-    data_obj = isolate->factory()->undefined_value();
-  } else {
-    data_obj = Utils::OpenHandle(*data);
-  }
-  Local<Value> result;
-  has_pending_exception = !ToLocal<Value>(
-      isolate->debug()->Call(Utils::OpenHandle(*fun), data_obj), &result);
-  RETURN_ON_FAILED_EXECUTION(Value);
-  RETURN_ESCAPED(result);
-}
-
 void debug::SetLiveEditEnabled(Isolate* isolate, bool enable) {
   i::Isolate* internal_isolate = reinterpret_cast<i::Isolate*>(isolate);
   internal_isolate->debug()->set_live_edit_enabled(enable);
 }
 
-void debug::DebugBreak(Isolate* isolate) {
-  reinterpret_cast<i::Isolate*>(isolate)->stack_guard()->RequestDebugBreak();
+void debug::SetBreakOnNextFunctionCall(Isolate* isolate) {
+  reinterpret_cast<i::Isolate*>(isolate)->debug()->SetBreakOnNextFunctionCall();
 }
 
-void debug::CancelDebugBreak(Isolate* isolate) {
-  i::Isolate* internal_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  internal_isolate->stack_guard()->ClearDebugBreak();
+void debug::ClearBreakOnNextFunctionCall(Isolate* isolate) {
+  reinterpret_cast<i::Isolate*>(isolate)
+      ->debug()
+      ->ClearBreakOnNextFunctionCall();
 }
 
 MaybeLocal<Array> debug::GetInternalProperties(Isolate* v8_isolate,
@@ -9167,11 +9147,6 @@ void debug::SetBreakPointsActive(Isolate* v8_isolate, bool is_active) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
   isolate->debug()->set_break_points_active(is_active);
-}
-
-void debug::SetOutOfMemoryCallback(Isolate* isolate,
-                                   OutOfMemoryCallback callback, void* data) {
-  // No-op.
 }
 
 void debug::PrepareStep(Isolate* v8_isolate, StepAction action) {
@@ -9580,6 +9555,11 @@ void debug::SetDebugDelegate(Isolate* v8_isolate,
   isolate->debug()->SetDebugDelegate(delegate, false);
 }
 
+void debug::SetAsyncEventDelegate(Isolate* v8_isolate,
+                                  debug::AsyncEventDelegate* delegate) {
+  reinterpret_cast<i::Isolate*>(v8_isolate)->set_async_event_delegate(delegate);
+}
+
 void debug::ResetBlackboxedStateCache(Isolate* v8_isolate,
                                       v8::Local<debug::Script> script) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
@@ -9858,6 +9838,13 @@ bool debug::SetFunctionBreakpoint(v8::Local<v8::Function> function,
   return isolate->debug()->SetBreakpointForFunction(jsfunction,
                                                     condition_string, id);
 }
+
+debug::PostponeInterruptsScope::PostponeInterruptsScope(v8::Isolate* isolate)
+    : scope_(
+          new i::PostponeInterruptsScope(reinterpret_cast<i::Isolate*>(isolate),
+                                         i::StackGuard::API_INTERRUPT)) {}
+
+debug::PostponeInterruptsScope::~PostponeInterruptsScope() {}
 
 Local<String> CpuProfileNode::GetFunctionName() const {
   const i::ProfileNode* node = reinterpret_cast<const i::ProfileNode*>(this);
@@ -10465,9 +10452,25 @@ void HeapProfiler::SetGetRetainerInfosCallback(
 }
 
 void HeapProfiler::SetBuildEmbedderGraphCallback(
-    BuildEmbedderGraphCallback callback) {
-  reinterpret_cast<i::HeapProfiler*>(this)->SetBuildEmbedderGraphCallback(
-      callback);
+    LegacyBuildEmbedderGraphCallback callback) {
+  reinterpret_cast<i::HeapProfiler*>(this)->AddBuildEmbedderGraphCallback(
+      [](v8::Isolate* isolate, v8::EmbedderGraph* graph, void* data) {
+        reinterpret_cast<LegacyBuildEmbedderGraphCallback>(data)(isolate,
+                                                                 graph);
+      },
+      reinterpret_cast<void*>(callback));
+}
+
+void HeapProfiler::AddBuildEmbedderGraphCallback(
+    BuildEmbedderGraphCallback callback, void* data) {
+  reinterpret_cast<i::HeapProfiler*>(this)->AddBuildEmbedderGraphCallback(
+      callback, data);
+}
+
+void HeapProfiler::RemoveBuildEmbedderGraphCallback(
+    BuildEmbedderGraphCallback callback, void* data) {
+  reinterpret_cast<i::HeapProfiler*>(this)->RemoveBuildEmbedderGraphCallback(
+      callback, data);
 }
 
 v8::Testing::StressType internal::Testing::stress_type_ =

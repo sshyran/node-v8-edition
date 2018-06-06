@@ -720,7 +720,8 @@ Instruction* InstructionSelector::EmitWithContinuation(
   } else if (cont->IsSet()) {
     continuation_outputs_.push_back(g.DefineAsRegister(cont->result()));
   } else if (cont->IsTrap()) {
-    continuation_inputs_.push_back(g.UseImmediate(cont->trap_id()));
+    int trap_id = static_cast<int>(cont->trap_id());
+    continuation_inputs_.push_back(g.UseImmediate(trap_id));
   } else {
     DCHECK(cont->IsNone());
   }
@@ -1272,11 +1273,9 @@ void InstructionSelector::VisitNode(Node* node) {
     case IrOpcode::kDeoptimizeUnless:
       return VisitDeoptimizeUnless(node);
     case IrOpcode::kTrapIf:
-      return VisitTrapIf(node, static_cast<Runtime::FunctionId>(
-                                   OpParameter<int32_t>(node->op())));
+      return VisitTrapIf(node, TrapIdOf(node->op()));
     case IrOpcode::kTrapUnless:
-      return VisitTrapUnless(node, static_cast<Runtime::FunctionId>(
-                                       OpParameter<int32_t>(node->op())));
+      return VisitTrapUnless(node, TrapIdOf(node->op()));
     case IrOpcode::kFrameState:
     case IrOpcode::kStateValues:
     case IrOpcode::kObjectState:
@@ -2754,16 +2753,15 @@ void InstructionSelector::VisitDeoptimizeUnless(Node* node) {
   }
 }
 
-void InstructionSelector::VisitTrapIf(Node* node, Runtime::FunctionId func_id) {
+void InstructionSelector::VisitTrapIf(Node* node, TrapId trap_id) {
   FlagsContinuation cont =
-      FlagsContinuation::ForTrap(kNotEqual, func_id, node->InputAt(1));
+      FlagsContinuation::ForTrap(kNotEqual, trap_id, node->InputAt(1));
   VisitWordCompareZero(node, node->InputAt(0), &cont);
 }
 
-void InstructionSelector::VisitTrapUnless(Node* node,
-                                          Runtime::FunctionId func_id) {
+void InstructionSelector::VisitTrapUnless(Node* node, TrapId trap_id) {
   FlagsContinuation cont =
-      FlagsContinuation::ForTrap(kEqual, func_id, node->InputAt(1));
+      FlagsContinuation::ForTrap(kEqual, trap_id, node->InputAt(1));
   VisitWordCompareZero(node, node->InputAt(0), &cont);
 }
 
@@ -2873,8 +2871,21 @@ bool InstructionSelector::TryMatch32x4Shuffle(const uint8_t* shuffle,
 }
 
 // static
+bool InstructionSelector::TryMatch16x8Shuffle(const uint8_t* shuffle,
+                                              uint8_t* shuffle16x8) {
+  for (int i = 0; i < 8; ++i) {
+    if (shuffle[i * 2] % 2 != 0) return false;
+    for (int j = 1; j < 2; ++j) {
+      if (shuffle[i * 2 + j] - shuffle[i * 2 + j - 1] != 1) return false;
+    }
+    shuffle16x8[i] = shuffle[i * 2] / 2;
+  }
+  return true;
+}
+
+// static
 bool InstructionSelector::TryMatchConcat(const uint8_t* shuffle, uint8_t mask,
-                                         uint8_t* vext) {
+                                         uint8_t* offset) {
   uint8_t start = shuffle[0];
   int i = 1;
   for (; i < 16 - start; ++i) {
@@ -2884,12 +2895,18 @@ bool InstructionSelector::TryMatchConcat(const uint8_t* shuffle, uint8_t mask,
   for (; i < 16; ++i, ++wrap) {
     if ((shuffle[i] & mask) != (wrap & mask)) return false;
   }
-  *vext = start;
+  *offset = start;
   return true;
 }
 
-// Canonicalize shuffles to make pattern matching simpler. Returns a mask that
-// will ignore the high bit of indices in some cases.
+// static
+bool InstructionSelector::TryMatchBlend(const uint8_t* shuffle) {
+  for (int i = 0; i < 16; ++i) {
+    if ((shuffle[i] & 0xF) != i) return false;
+  }
+  return true;
+}
+
 uint8_t InstructionSelector::CanonicalizeShuffle(Node* node) {
   static const int kMaxLaneIndex = 15;
   static const int kMaxShuffleIndex = 31;
@@ -2906,7 +2923,7 @@ uint8_t InstructionSelector::CanonicalizeShuffle(Node* node) {
     bool src0_is_used = false;
     bool src1_is_used = false;
     for (int i = 0; i < 16; ++i) {
-      if (shuffle[i] < 16) {
+      if (shuffle[i] <= kMaxLaneIndex) {
         src0_is_used = true;
       } else {
         src1_is_used = true;

@@ -419,7 +419,7 @@ bool AccessInfoFactory::ComputePropertyAccessInfo(
           DCHECK(!FLAG_track_constant_fields);
           *access_info = PropertyAccessInfo::DataConstant(
               MapHandles{receiver_map},
-              handle(descriptors->GetValue(number), isolate()), holder);
+              handle(descriptors->GetStrongValue(number), isolate()), holder);
           return true;
         } else {
           DCHECK_EQ(kAccessor, details.kind());
@@ -444,7 +444,8 @@ bool AccessInfoFactory::ComputePropertyAccessInfo(
                 MapHandles{receiver_map}, cell);
             return true;
           }
-          Handle<Object> accessors(descriptors->GetValue(number), isolate());
+          Handle<Object> accessors(descriptors->GetStrongValue(number),
+                                   isolate());
           if (!accessors->IsAccessorPair()) return false;
           Handle<Object> accessor(
               access_mode == AccessMode::kLoad
@@ -621,7 +622,7 @@ bool AccessInfoFactory::LookupSpecialFieldAccessor(
     Handle<Map> map, Handle<Name> name, PropertyAccessInfo* access_info) {
   // Check for special JSObject field accessors.
   FieldIndex field_index;
-  if (Accessors::IsJSObjectFieldAccessor(map, name, &field_index)) {
+  if (Accessors::IsJSObjectFieldAccessor(isolate(), map, name, &field_index)) {
     Type field_type = Type::NonInternal();
     MachineRepresentation field_representation = MachineRepresentation::kTagged;
     if (map->IsStringMap()) {
@@ -662,7 +663,7 @@ bool AccessInfoFactory::LookupTransition(Handle<Map> map, Handle<Name> name,
                                          PropertyAccessInfo* access_info) {
   // Check if the {map} has a data transition with the given {name}.
   Map* transition =
-      TransitionsAccessor(map).SearchTransition(*name, kData, NONE);
+      TransitionsAccessor(isolate_, map).SearchTransition(*name, kData, NONE);
   if (transition == nullptr) return false;
 
   Handle<Map> transition_map(transition);

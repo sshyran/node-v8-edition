@@ -1597,32 +1597,33 @@ class LiftoffCompiler {
   void Int32ToSmi(LiftoffRegister dst, Register src, Register scratch) {
     constexpr int kTotalSmiShift = kSmiTagSize + kSmiShiftSize;
     // TODO(clemensh): Shift by immediate directly.
-    if (kPointerSize == 4) {
-      __ LoadConstant(LiftoffRegister(scratch),
-                      WasmValue(int32_t{kTotalSmiShift}));
-      __ emit_i32_shl(dst.gp(), src, scratch);
-    } else {
+    if (SmiValuesAre32Bits()) {
       __ LoadConstant(LiftoffRegister(scratch),
                       WasmValue(int64_t{kTotalSmiShift}));
       __ emit_i64_shl(dst, LiftoffRegister(src), scratch);
+    } else {
+      DCHECK(SmiValuesAre31Bits());
+      __ LoadConstant(LiftoffRegister(scratch),
+                      WasmValue(int32_t{kTotalSmiShift}));
+      __ emit_i32_shl(dst.gp(), src, scratch);
+      if (kPointerSize == kInt64Size) {
+        __ emit_i32_to_intptr(dst.gp(), dst.gp());
+      }
     }
   }
 
   void SmiToInt32(Register dst, LiftoffRegister src, Register scratch) {
     constexpr int kTotalSmiShift = kSmiTagSize + kSmiShiftSize;
     // TODO(clemensh): Shift by immediate directly.
-    if (kPointerSize == 4) {
-      __ LoadConstant(LiftoffRegister(scratch),
-                      WasmValue(int32_t{kTotalSmiShift}));
-      __ emit_i32_sar(dst, src.gp(), scratch);
-    } else {
-      // Assert that we shift by exactly 32 bit. This makes the returned value a
-      // zero-extended 32-bit value without emitting further instructions.
-      static_assert(kPointerSize == 4 || kTotalSmiShift == 32,
-                    "shift by exactly 32 bit");
+    if (SmiValuesAre32Bits()) {
       __ LoadConstant(LiftoffRegister(scratch),
                       WasmValue(int64_t{kTotalSmiShift}));
       __ emit_i64_shr(LiftoffRegister(dst), src, scratch);
+    } else {
+      DCHECK(SmiValuesAre31Bits());
+      __ LoadConstant(LiftoffRegister(scratch),
+                      WasmValue(int32_t{kTotalSmiShift}));
+      __ emit_i32_sar(dst, src.gp(), scratch);
     }
   }
 
@@ -1949,8 +1950,11 @@ bool LiftoffCompilationUnit::ExecuteCompilation() {
       compiler::GetWasmCallDescriptor(&zone, wasm_unit_->func_body_.sig);
   base::Optional<TimedHistogramScope> liftoff_compile_time_scope(
       base::in_place, wasm_unit_->counters_->liftoff_compile_time());
-  wasm::WasmCode* const* code_table_entry =
-      wasm_unit_->native_module_->code_table().data() + wasm_unit_->func_index_;
+  // TODO(clemensh): Remove this once we have the jump table (issue 7758).
+  wasm::WasmCode** code_table_entry =
+      &wasm_unit_->native_module_
+           ->code_table()[wasm_unit_->func_index_ -
+                          wasm_unit_->native_module_->num_imported_functions()];
   DCHECK(!protected_instructions_);
   protected_instructions_.reset(
       new std::vector<trap_handler::ProtectedInstructionData>());

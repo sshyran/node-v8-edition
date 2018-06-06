@@ -368,6 +368,7 @@ class RelocInfo {
     CODE_TARGET,
     EMBEDDED_OBJECT,
     WASM_CALL,
+    WASM_STUB_CALL,
     JS_TO_WASM_CALL,
 
     RUNTIME_ENTRY,
@@ -397,6 +398,7 @@ class RelocInfo {
     PC_JUMP,
 
     // Points to a wasm code table entry.
+    // TODO(clemensh): Remove this once we have the jump table (issue 7758).
     WASM_CODE_TABLE_ENTRY,
 
     // Pseudo-types
@@ -414,8 +416,13 @@ class RelocInfo {
 
   RelocInfo() = default;
 
-  RelocInfo(Address pc, Mode rmode, intptr_t data, Code* host)
-      : pc_(pc), rmode_(rmode), data_(data), host_(host) {}
+  RelocInfo(Address pc, Mode rmode, intptr_t data, Code* host,
+            Address constant_pool = kNullAddress)
+      : pc_(pc),
+        rmode_(rmode),
+        data_(data),
+        host_(host),
+        constant_pool_(constant_pool) {}
 
   static inline bool IsRealRelocMode(Mode mode) {
     return mode >= FIRST_REAL_RELOC_MODE && mode <= LAST_REAL_RELOC_MODE;
@@ -430,6 +437,9 @@ class RelocInfo {
     return mode == RUNTIME_ENTRY;
   }
   static inline bool IsWasmCall(Mode mode) { return mode == WASM_CALL; }
+  static inline bool IsWasmStubCall(Mode mode) {
+    return mode == WASM_STUB_CALL;
+  }
   // Is the relocation mode affected by GC?
   static inline bool IsGCRelocMode(Mode mode) {
     return mode <= LAST_GCED_ENUM;
@@ -480,9 +490,6 @@ class RelocInfo {
   intptr_t data() const { return data_; }
   Code* host() const { return host_; }
   Address constant_pool() const { return constant_pool_; }
-  void set_constant_pool(Address constant_pool) {
-    constant_pool_ = constant_pool;
-  }
 
   // Apply a relocation by delta bytes. When the code object is moved, PC
   // relative addresses have to be updated as well as absolute addresses
@@ -503,18 +510,23 @@ class RelocInfo {
   // constant pool, otherwise the pointer is embedded in the instruction stream.
   bool IsInConstantPool();
 
-  Address js_to_wasm_address() const;
   Address wasm_call_address() const;
+  Address wasm_stub_call_address() const;
+  Address js_to_wasm_address() const;
+
+  uint32_t wasm_stub_call_tag() const;
+
+  void set_wasm_call_address(
+      Address, ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
+  void set_wasm_stub_call_address(
+      Address, ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
+  void set_js_to_wasm_address(
+      Address, ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
   void set_target_address(
       Address target,
       WriteBarrierMode write_barrier_mode = UPDATE_WRITE_BARRIER,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
-
-  void set_wasm_call_address(
-      Address, ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
-  void set_js_to_wasm_address(
-      Address, ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
   // this relocation applies to;
   // can only be called if IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_)
@@ -522,7 +534,7 @@ class RelocInfo {
   INLINE(HeapObject* target_object());
   INLINE(Handle<HeapObject> target_object_handle(Assembler* origin));
   INLINE(void set_target_object(
-      HeapObject* target,
+      Heap* heap, HeapObject* target,
       WriteBarrierMode write_barrier_mode = UPDATE_WRITE_BARRIER,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED));
   INLINE(Address target_runtime_entry(Assembler* origin));
@@ -602,12 +614,6 @@ class RelocInfo {
   static const int kApplyMask;  // Modes affected by apply.  Depends on arch.
 
  private:
-  void set_embedded_address(Address address, ICacheFlushMode flush_mode);
-  void set_embedded_size(uint32_t size, ICacheFlushMode flush_mode);
-
-  uint32_t embedded_size() const;
-  Address embedded_address() const;
-
   // On ARM/ARM64, note that pc_ is the address of the instruction referencing
   // the constant pool and not the address of the constant pool entry.
   Address pc_;

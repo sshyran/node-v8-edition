@@ -136,19 +136,37 @@ void TurboAssembler::Jump(Register target) {
 
 #ifdef V8_EMBEDDED_BUILTINS
 void TurboAssembler::LookupConstant(Register destination,
-                                    Handle<Object> object) {
+                                    Handle<HeapObject> object) {
   CHECK(isolate()->ShouldLoadConstantsFromRootList());
   CHECK(root_array_available_);
+
+  // Before falling back to the (fairly slow) lookup from the constants table,
+  // check if any of the fast paths can be applied.
+  {
+    int builtin_index;
+    Heap::RootListIndex root_index;
+    if (isolate()->heap()->IsRootHandle(object, &root_index)) {
+      // Roots are loaded relative to the root register.
+      LoadRoot(destination, root_index);
+      return;
+    } else if (isolate()->builtins()->IsBuiltinHandle(object, &builtin_index)) {
+      // Similar to roots, builtins may be loaded from the builtins table.
+      LoadBuiltin(destination, builtin_index);
+      return;
+    } else if (object.is_identical_to(code_object_) &&
+               Builtins::IsBuiltinId(maybe_builtin_index_)) {
+      // The self-reference loaded through Codevalue() may also be a builtin
+      // and thus viable for a fast load.
+      LoadBuiltin(destination, maybe_builtin_index_);
+      return;
+    }
+  }
 
   // Ensure the given object is in the builtins constants table and fetch its
   // index.
   BuiltinsConstantsTableBuilder* builder =
       isolate()->builtins_constants_table_builder();
   uint32_t index = builder->AddObject(object);
-
-  // TODO(jgruber): Load builtins from the builtins table.
-  // TODO(jgruber): Ensure that code generation can recognize constant targets
-  // in kArchCallCodeObject.
 
   DCHECK(isolate()->heap()->RootCanBeTreatedAsConstant(
       Heap::kBuiltinsConstantsTableRootIndex));
@@ -184,6 +202,15 @@ void TurboAssembler::LookupExternalReference(Register destination,
 
   LoadP(destination,
         MemOperand(kRootRegister, roots_to_external_reference_offset), r0);
+}
+
+void TurboAssembler::LoadBuiltin(Register destination, int builtin_index) {
+  DCHECK(Builtins::IsBuiltinId(builtin_index));
+
+  int32_t roots_to_builtins_offset =
+      Heap::roots_to_builtins_offset() + builtin_index * kPointerSize;
+
+  LoadP(destination, MemOperand(kRootRegister, roots_to_builtins_offset), r0);
 }
 #endif  // V8_EMBEDDED_BUILTINS
 
@@ -373,12 +400,7 @@ void TurboAssembler::Push(Smi* smi) {
 void TurboAssembler::Move(Register dst, Handle<HeapObject> value) {
 #ifdef V8_EMBEDDED_BUILTINS
   if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList()) {
-    Heap::RootListIndex root_index;
-    if (!isolate()->heap()->IsRootHandle(value, &root_index)) {
-      LookupConstant(dst, value);
-    } else {
-      LoadRoot(dst, root_index);
-    }
+    LookupConstant(dst, value);
     return;
   }
 #endif  // V8_EMBEDDED_BUILTINS
@@ -1430,9 +1452,9 @@ void MacroAssembler::InvokeFunction(Register fun, Register new_target,
 
   LoadP(temp_reg, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
   LoadP(cp, FieldMemOperand(r4, JSFunction::kContextOffset));
-  LoadWordArith(expected_reg,
-                FieldMemOperand(
-                    temp_reg, SharedFunctionInfo::kFormalParameterCountOffset));
+  LoadHalfWord(expected_reg,
+               FieldMemOperand(
+                   temp_reg, SharedFunctionInfo::kFormalParameterCountOffset));
 
   ParameterCount expected(expected_reg);
   InvokeFunctionCode(fun, new_target, expected, actual, flag);
@@ -2731,6 +2753,7 @@ void MacroAssembler::LoadHalfWord(Register dst, const MemOperand& mem,
   int offset = mem.offset();
 
   if (!is_int16(offset)) {
+    DCHECK_NE(scratch, no_reg);
     LoadIntLiteral(scratch, offset);
     lhzx(dst, MemOperand(base, scratch));
   } else {

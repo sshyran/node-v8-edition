@@ -203,26 +203,6 @@ bool RelocInfo::IsInConstantPool() {
   return false;
 }
 
-Address RelocInfo::embedded_address() const { return Memory::Address_at(pc_); }
-
-uint32_t RelocInfo::embedded_size() const { return Memory::uint32_at(pc_); }
-
-void RelocInfo::set_embedded_address(Address address,
-                                     ICacheFlushMode icache_flush_mode) {
-  Memory::Address_at(pc_) = address;
-  if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
-    Assembler::FlushICache(pc_, sizeof(Address));
-  }
-}
-
-void RelocInfo::set_embedded_size(uint32_t size,
-                                  ICacheFlushMode icache_flush_mode) {
-  Memory::uint32_at(pc_) = size;
-  if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
-    Assembler::FlushICache(pc_, sizeof(uint32_t));
-  }
-}
-
 void RelocInfo::set_js_to_wasm_address(Address address,
                                        ICacheFlushMode icache_flush_mode) {
   DCHECK_EQ(rmode_, JS_TO_WASM_CALL);
@@ -233,6 +213,11 @@ void RelocInfo::set_js_to_wasm_address(Address address,
 Address RelocInfo::js_to_wasm_address() const {
   DCHECK_EQ(rmode_, JS_TO_WASM_CALL);
   return Assembler::target_address_at(pc_, constant_pool_);
+}
+
+uint32_t RelocInfo::wasm_stub_call_tag() const {
+  DCHECK_EQ(rmode_, WASM_STUB_CALL);
+  return Memory::uint32_at(pc_);
 }
 
 // -----------------------------------------------------------------------------
@@ -2706,6 +2691,15 @@ void Assembler::psrlq(XMMRegister dst, XMMRegister src) {
   emit_sse_operand(dst, src);
 }
 
+void Assembler::pshufhw(XMMRegister dst, Operand src, uint8_t shuffle) {
+  EnsureSpace ensure_space(this);
+  EMIT(0xF3);
+  EMIT(0x0F);
+  EMIT(0x70);
+  emit_sse_operand(dst, src);
+  EMIT(shuffle);
+}
+
 void Assembler::pshuflw(XMMRegister dst, Operand src, uint8_t shuffle) {
   EnsureSpace ensure_space(this);
   EMIT(0xF2);
@@ -2731,6 +2725,17 @@ void Assembler::pblendw(XMMRegister dst, Operand src, uint8_t mask) {
   EMIT(0x0F);
   EMIT(0x3A);
   EMIT(0x0E);
+  emit_sse_operand(dst, src);
+  EMIT(mask);
+}
+
+void Assembler::palignr(XMMRegister dst, Operand src, uint8_t mask) {
+  DCHECK(IsEnabled(SSSE3));
+  EnsureSpace ensure_space(this);
+  EMIT(0x66);
+  EMIT(0x0F);
+  EMIT(0x3A);
+  EMIT(0x0F);
   emit_sse_operand(dst, src);
   EMIT(mask);
 }
@@ -2959,6 +2964,11 @@ void Assembler::vpsrad(XMMRegister dst, XMMRegister src, int8_t imm8) {
   EMIT(imm8);
 }
 
+void Assembler::vpshufhw(XMMRegister dst, Operand src, uint8_t shuffle) {
+  vinstr(0x70, dst, xmm0, src, kF3, k0F, kWIG);
+  EMIT(shuffle);
+}
+
 void Assembler::vpshuflw(XMMRegister dst, Operand src, uint8_t shuffle) {
   vinstr(0x70, dst, xmm0, src, kF2, k0F, kWIG);
   EMIT(shuffle);
@@ -2972,6 +2982,12 @@ void Assembler::vpshufd(XMMRegister dst, Operand src, uint8_t shuffle) {
 void Assembler::vpblendw(XMMRegister dst, XMMRegister src1, Operand src2,
                          uint8_t mask) {
   vinstr(0x0E, dst, src1, src2, k66, k0F3A, kWIG);
+  EMIT(mask);
+}
+
+void Assembler::vpalignr(XMMRegister dst, XMMRegister src1, Operand src2,
+                         uint8_t mask) {
+  vinstr(0x0F, dst, src1, src2, k66, k0F3A, kWIG);
   EMIT(mask);
 }
 

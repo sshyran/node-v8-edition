@@ -533,8 +533,9 @@ wasm::InterpreterHandle* GetOrCreateInterpreterHandle(
     Isolate* isolate, Handle<WasmDebugInfo> debug_info) {
   Handle<Object> handle(debug_info->interpreter_handle(), isolate);
   if (handle->IsUndefined(isolate)) {
-    handle = Managed<wasm::InterpreterHandle>::Allocate(isolate, isolate,
-                                                        *debug_info);
+    size_t interpreter_size = 0;  // TODO(titzer): estimate size properly.
+    handle = Managed<wasm::InterpreterHandle>::Allocate(
+        isolate, interpreter_size, isolate, *debug_info);
     debug_info->set_interpreter_handle(*handle);
   }
 
@@ -561,7 +562,7 @@ Handle<FixedArray> GetOrCreateInterpretedFunctions(
   int num_functions = debug_info->wasm_instance()
                           ->compiled_module()
                           ->GetNativeModule()
-                          ->function_count();
+                          ->num_functions();
   Handle<FixedArray> new_arr = isolate->factory()->NewFixedArray(num_functions);
   debug_info->set_interpreted_functions(*new_arr);
   return new_arr;
@@ -602,7 +603,7 @@ void RedirectCallsitesInInstance(Isolate* isolate, WasmInstanceObject* instance,
   wasm::NativeModule* native_module =
       instance->compiled_module()->GetNativeModule();
   for (uint32_t i = native_module->num_imported_functions(),
-                e = native_module->function_count();
+                e = native_module->num_functions();
        i < e; ++i) {
     wasm::WasmCode* code = native_module->code(i);
     RedirectCallsitesInCode(isolate, code, map);
@@ -633,8 +634,9 @@ wasm::WasmInterpreter* WasmDebugInfo::SetupForTesting(
     Handle<WasmInstanceObject> instance_obj) {
   Handle<WasmDebugInfo> debug_info = WasmDebugInfo::New(instance_obj);
   Isolate* isolate = instance_obj->GetIsolate();
-  auto interp_handle =
-      Managed<wasm::InterpreterHandle>::Allocate(isolate, isolate, *debug_info);
+  size_t interpreter_size = 0;  // TODO(titzer): estimate size properly.
+  auto interp_handle = Managed<wasm::InterpreterHandle>::Allocate(
+      isolate, interpreter_size, isolate, *debug_info);
   debug_info->set_interpreter_handle(*interp_handle);
   auto ret = interp_handle->raw()->interpreter();
   ret->SetCallIndirectTestMode();
@@ -753,7 +755,8 @@ Handle<JSFunction> WasmDebugInfo::GetCWasmEntry(
   if (!debug_info->has_c_wasm_entries()) {
     auto entries = isolate->factory()->NewFixedArray(4, TENURED);
     debug_info->set_c_wasm_entries(*entries);
-    auto managed_map = Managed<wasm::SignatureMap>::Allocate(isolate);
+    size_t map_size = 0;  // size estimate not so important here.
+    auto managed_map = Managed<wasm::SignatureMap>::Allocate(isolate, map_size);
     debug_info->set_c_wasm_entry_map(*managed_map);
   }
   Handle<FixedArray> entries(debug_info->c_wasm_entries(), isolate);

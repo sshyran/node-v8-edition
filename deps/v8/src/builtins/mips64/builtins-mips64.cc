@@ -486,8 +486,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   // values have already been copied into the context and these dummy values
   // will never be used.
   __ Ld(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
-  __ Lw(a3,
-        FieldMemOperand(a3, SharedFunctionInfo::kFormalParameterCountOffset));
+  __ Lhu(a3,
+         FieldMemOperand(a3, SharedFunctionInfo::kFormalParameterCountOffset));
   __ Ld(t1,
         FieldMemOperand(a1, JSGeneratorObject::kParametersAndRegistersOffset));
   {
@@ -517,8 +517,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   // Resume (Ignition/TurboFan) generator object.
   {
     __ Ld(a0, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
-    __ Lw(a0,
-          FieldMemOperand(a0, SharedFunctionInfo::kFormalParameterCountOffset));
+    __ Lhu(a0, FieldMemOperand(
+                   a0, SharedFunctionInfo::kFormalParameterCountOffset));
     // We abuse new.target both to indicate that this is a resume call and to
     // pass in the generator object.  In ordinary calls, new.target is always
     // undefined because generator functions are non-constructable.
@@ -2003,8 +2003,8 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
   {
     __ Ld(a7, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
     __ Ld(a7, FieldMemOperand(a7, JSFunction::kSharedFunctionInfoOffset));
-    __ Lw(a7,
-          FieldMemOperand(a7, SharedFunctionInfo::kFormalParameterCountOffset));
+    __ Lhu(a7, FieldMemOperand(
+                   a7, SharedFunctionInfo::kFormalParameterCountOffset));
     __ mov(a6, fp);
   }
   __ Branch(&arguments_done);
@@ -2138,8 +2138,8 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   //  -- cp : the function context.
   // -----------------------------------
 
-  __ Lw(a2,
-        FieldMemOperand(a2, SharedFunctionInfo::kFormalParameterCountOffset));
+  __ Lhu(a2,
+         FieldMemOperand(a2, SharedFunctionInfo::kFormalParameterCountOffset));
   ParameterCount actual(a0);
   ParameterCount expected(a2);
   __ InvokeFunctionCode(a1, no_reg, expected, actual, JUMP_FUNCTION);
@@ -2953,8 +2953,7 @@ void Builtins::Generate_DoubleToI(MacroAssembler* masm) {
 }
 
 void Builtins::Generate_MathPowInternal(MacroAssembler* masm) {
-  const Register exponent = MathPowTaggedDescriptor::exponent();
-  DCHECK(exponent == a2);
+  const Register exponent = a2;
   const DoubleRegister double_base = f2;
   const DoubleRegister double_exponent = f4;
   const DoubleRegister double_result = f0;

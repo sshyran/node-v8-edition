@@ -29,8 +29,11 @@ class CallDescriptor;
 class Graph;
 class MachineGraph;
 class Node;
+class NodeOriginTable;
 class Operator;
 class SourcePositionTable;
+class WasmDecorator;
+enum class TrapId : uint32_t;
 }  // namespace compiler
 
 namespace wasm {
@@ -78,7 +81,8 @@ class TurbofanWasmCompilationUnit {
   explicit TurbofanWasmCompilationUnit(wasm::WasmCompilationUnit* wasm_unit);
   ~TurbofanWasmCompilationUnit();
 
-  SourcePositionTable* BuildGraphForWasmFunction(double* decode_ms);
+  SourcePositionTable* BuildGraphForWasmFunction(double* decode_ms,
+                                                 NodeOriginTable* node_origins);
 
   void ExecuteCompilation();
 
@@ -157,8 +161,7 @@ class WasmGraphBuilder {
   };
   enum UseRetpoline : bool { kRetpoline = true, kNoRetpoline = false };
 
-  WasmGraphBuilder(Isolate* isolate, wasm::ModuleEnv* env, Zone* zone,
-                   MachineGraph* mcgraph, Handle<Code> centry_stub,
+  WasmGraphBuilder(wasm::ModuleEnv* env, Zone* zone, MachineGraph* mcgraph,
                    wasm::FunctionSig* sig,
                    compiler::SourcePositionTable* spt = nullptr);
 
@@ -331,10 +334,14 @@ class WasmGraphBuilder {
   MachineGraph* mcgraph() { return mcgraph_; }
   Graph* graph();
 
+  void AddBytecodePositionDecorator(NodeOriginTable* node_origins,
+                                    wasm::Decoder* decoder);
+
+  void RemoveBytecodePositionDecorator();
+
  protected:
   static const int kDefaultBufferSize = 16;
 
-  Isolate* const isolate_;
   Zone* const zone_;
   MachineGraph* const mcgraph_;
   wasm::ModuleEnv* const env_;
@@ -343,13 +350,10 @@ class WasmGraphBuilder {
   Node** effect_ = nullptr;
   WasmInstanceCacheNodes* instance_cache_ = nullptr;
 
-  Handle<Code> centry_stub_;
-
   SetOncePointer<Node> instance_node_;
   SetOncePointer<Node> globals_start_;
   SetOncePointer<Node> imported_mutable_globals_;
-  SetOncePointer<Node> centry_stub_node_;
-  SetOncePointer<Node> stack_check_builtin_code_node_;
+  SetOncePointer<Node> stack_check_code_node_;
   const Operator* stack_check_call_operator_ = nullptr;
 
   Node** cur_buffer_;
@@ -361,9 +365,10 @@ class WasmGraphBuilder {
 
   wasm::FunctionSig* const sig_;
 
+  compiler::WasmDecorator* decorator_ = nullptr;
+
   compiler::SourcePositionTable* const source_position_table_ = nullptr;
 
-  Node* CEntryStub();
   Node* NoContextConstant();
 
   Node* MemBuffer(uint32_t offset);
@@ -444,6 +449,7 @@ class WasmGraphBuilder {
                        MachineType result_type, wasm::TrapReason trap_zero,
                        wasm::WasmCodePosition position);
 
+  Node* BuildChangeInt32ToIntPtr(Node* value);
   Node* BuildChangeInt32ToSmi(Node* value);
   Node* BuildChangeUint31ToSmi(Node* value);
   Node* BuildSmiShiftBitsConstant();
@@ -488,7 +494,7 @@ class WasmGraphBuilder {
                                             Node* js_context,
                                             Node* const* parameters,
                                             int parameter_count);
-  Builtins::Name GetBuiltinIdForTrap(wasm::TrapReason reason);
+  TrapId GetTrapIdForTrap(wasm::TrapReason reason);
 };
 
 V8_EXPORT_PRIVATE CallDescriptor* GetWasmCallDescriptor(

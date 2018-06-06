@@ -89,6 +89,7 @@ class V8RuntimeAgentImpl : public protocol::Runtime::Backend {
   Response releaseObjectGroup(const String16& objectGroup) override;
   Response runIfWaitingForDebugger() override;
   Response setCustomObjectFormatterEnabled(bool) override;
+  Response setMaxCallStackSizeToCapture(int) override;
   Response discardConsoleEntries() override;
   Response compileScript(const String16& expression, const String16& sourceURL,
                          bool persistScript, Maybe<int> executionContextId,
@@ -110,6 +111,11 @@ class V8RuntimeAgentImpl : public protocol::Runtime::Backend {
   void terminateExecution(
       std::unique_ptr<TerminateExecutionCallback> callback) override;
 
+  Response addBinding(const String16& name,
+                      Maybe<int> executionContextId) override;
+  Response removeBinding(const String16& name) override;
+  void addBindings(InspectedContext* context);
+
   void reset();
   void reportExecutionContextCreated(InspectedContext*);
   void reportExecutionContextDestroyed(InspectedContext*);
@@ -120,6 +126,11 @@ class V8RuntimeAgentImpl : public protocol::Runtime::Backend {
 
  private:
   bool reportMessage(V8ConsoleMessage*, bool generatePreview);
+
+  static void bindingCallback(const v8::FunctionCallbackInfo<v8::Value>& args);
+  void bindingCalled(const String16& name, const String16& payload,
+                     int executionContextId);
+  void addBinding(InspectedContext* context, const String16& name);
 
   V8InspectorSessionImpl* m_session;
   protocol::DictionaryValue* m_state;

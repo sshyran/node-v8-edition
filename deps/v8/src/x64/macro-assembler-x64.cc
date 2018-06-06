@@ -156,19 +156,37 @@ void MacroAssembler::Store(ExternalReference destination, Register source) {
 
 #ifdef V8_EMBEDDED_BUILTINS
 void TurboAssembler::LookupConstant(Register destination,
-                                    Handle<Object> object) {
+                                    Handle<HeapObject> object) {
   CHECK(isolate()->ShouldLoadConstantsFromRootList());
   CHECK(root_array_available_);
+
+  // Before falling back to the (fairly slow) lookup from the constants table,
+  // check if any of the fast paths can be applied.
+  {
+    int builtin_index;
+    Heap::RootListIndex root_index;
+    if (isolate()->heap()->IsRootHandle(object, &root_index)) {
+      // Roots are loaded relative to the root register.
+      LoadRoot(destination, root_index);
+      return;
+    } else if (isolate()->builtins()->IsBuiltinHandle(object, &builtin_index)) {
+      // Similar to roots, builtins may be loaded from the builtins table.
+      LoadBuiltin(destination, builtin_index);
+      return;
+    } else if (object.is_identical_to(code_object_) &&
+               Builtins::IsBuiltinId(maybe_builtin_index_)) {
+      // The self-reference loaded through Codevalue() may also be a builtin
+      // and thus viable for a fast load.
+      LoadBuiltin(destination, maybe_builtin_index_);
+      return;
+    }
+  }
 
   // Ensure the given object is in the builtins constants table and fetch its
   // index.
   BuiltinsConstantsTableBuilder* builder =
       isolate()->builtins_constants_table_builder();
   uint32_t index = builder->AddObject(object);
-
-  // TODO(jgruber): Load builtins from the builtins table.
-  // TODO(jgruber): Ensure that code generation can recognize constant targets
-  // in kArchCallCodeObject.
 
   DCHECK(isolate()->heap()->RootCanBeTreatedAsConstant(
       Heap::kBuiltinsConstantsTableRootIndex));
@@ -199,6 +217,16 @@ void TurboAssembler::LookupExternalReference(Register destination,
       ExternalReferenceTable::OffsetOfEntry(index);
 
   movp(destination, Operand(kRootRegister, roots_to_external_reference_offset));
+}
+
+void TurboAssembler::LoadBuiltin(Register destination, int builtin_index) {
+  DCHECK(Builtins::IsBuiltinId(builtin_index));
+
+  int32_t roots_to_builtins_offset = Heap::roots_to_builtins_offset() -
+                                     kRootRegisterBias +
+                                     builtin_index * kPointerSize;
+
+  movp(destination, Operand(kRootRegister, roots_to_builtins_offset));
 }
 #endif  // V8_EMBEDDED_BUILTINS
 
@@ -1103,6 +1131,7 @@ void MacroAssembler::SmiTag(Register dst, Register src) {
   if (dst != src) {
     movp(dst, src);
   }
+  DCHECK(SmiValuesAre32Bits() || SmiValuesAre31Bits());
   shlp(dst, Immediate(kSmiShift));
 }
 
@@ -1111,6 +1140,7 @@ void TurboAssembler::SmiUntag(Register dst, Register src) {
   if (dst != src) {
     movp(dst, src);
   }
+  DCHECK(SmiValuesAre32Bits() || SmiValuesAre31Bits());
   sarp(dst, Immediate(kSmiShift));
 }
 
@@ -1218,7 +1248,16 @@ void MacroAssembler::SmiAddConstant(Operand dst, Smi* constant) {
            Immediate(constant->value()));
     } else {
       DCHECK(SmiValuesAre31Bits());
-      addp(dst, Immediate(constant));
+      if (kPointerSize == kInt64Size) {
+        // Sign-extend value after addition
+        movl(kScratchRegister, dst);
+        addl(kScratchRegister, Immediate(constant));
+        movsxlq(kScratchRegister, kScratchRegister);
+        movq(dst, kScratchRegister);
+      } else {
+        DCHECK_EQ(kSmiShiftSize, 32);
+        addp(dst, Immediate(constant));
+      }
     }
   }
 }
@@ -1241,18 +1280,21 @@ SmiIndex MacroAssembler::SmiToIndex(Register dst,
     return SmiIndex(dst, times_1);
   } else {
     DCHECK(SmiValuesAre31Bits());
-    DCHECK(shift >= times_1 && shift <= (static_cast<int>(times_8) + 1));
     if (dst != src) {
       movp(dst, src);
     }
     // We have to sign extend the index register to 64-bit as the SMI might
     // be negative.
     movsxlq(dst, dst);
-    if (shift == times_1) {
-      sarq(dst, Immediate(kSmiShift));
-      return SmiIndex(dst, times_1);
+    if (shift < kSmiShift) {
+      sarq(dst, Immediate(kSmiShift - shift));
+    } else if (shift != kSmiShift) {
+      if (shift - kSmiShift <= static_cast<int>(times_8)) {
+        return SmiIndex(dst, static_cast<ScaleFactor>(shift - kSmiShift));
+      }
+      shlq(dst, Immediate(shift - kSmiShift));
     }
-    return SmiIndex(dst, static_cast<ScaleFactor>(shift - 1));
+    return SmiIndex(dst, times_1);
   }
 }
 
@@ -1387,12 +1429,7 @@ void TurboAssembler::Move(Register result, Handle<HeapObject> object,
                           RelocInfo::Mode rmode) {
 #ifdef V8_EMBEDDED_BUILTINS
   if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList()) {
-    Heap::RootListIndex root_index;
-    if (!isolate()->heap()->IsRootHandle(object, &root_index)) {
-      LookupConstant(result, object);
-    } else {
-      LoadRoot(result, root_index);
-    }
+    LookupConstant(result, object);
     return;
   }
 #endif  // V8_EMBEDDED_BUILTINS
@@ -2238,7 +2275,7 @@ void MacroAssembler::InvokeFunction(Register function, Register new_target,
                                     const ParameterCount& actual,
                                     InvokeFlag flag) {
   movp(rbx, FieldOperand(function, JSFunction::kSharedFunctionInfoOffset));
-  movsxlq(rbx,
+  movzxwq(rbx,
           FieldOperand(rbx, SharedFunctionInfo::kFormalParameterCountOffset));
 
   ParameterCount expected(rbx);
@@ -2712,10 +2749,7 @@ void TurboAssembler::ComputeCodeStartAddress(Register dst) {
   bind(&current);
   int pc = pc_offset();
   // Load effective address to get the address of the current instruction.
-  leaq(dst, Operand(&current));
-  if (pc != 0) {
-    subq(dst, Immediate(pc));
-  }
+  leaq(dst, Operand(&current, -pc));
 }
 
 void TurboAssembler::ResetSpeculationPoisonRegister() {

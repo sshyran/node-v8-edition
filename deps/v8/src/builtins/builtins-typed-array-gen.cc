@@ -589,8 +589,8 @@ void TypedArrayBuiltinsAssembler::ConstructByArrayLike(
 
   BIND(&fill);
   GotoIf(SmiEqual(length, SmiConstant(0)), &done);
-  TNode<Int32T> holder_kind = LoadMapElementsKind(LoadMap(holder));
-  TNode<Int32T> source_kind = LoadMapElementsKind(LoadMap(array_like));
+  TNode<Int32T> holder_kind = LoadElementsKind(holder);
+  TNode<Int32T> source_kind = LoadElementsKind(array_like);
   GotoIf(Word32Equal(holder_kind, source_kind), &fast_copy);
 
   // Copy using the elements accessor.
@@ -854,11 +854,6 @@ TNode<Word32T> TypedArrayBuiltinsAssembler::IsBigInt64ElementsKind(
                   Word32Equal(kind, Int32Constant(BIGUINT64_ELEMENTS)));
 }
 
-TNode<Word32T> TypedArrayBuiltinsAssembler::LoadElementsKind(
-    TNode<JSTypedArray> typed_array) {
-  return LoadMapElementsKind(LoadMap(typed_array));
-}
-
 TNode<IntPtrT> TypedArrayBuiltinsAssembler::GetTypedArrayElementSize(
     TNode<Word32T> elements_kind) {
   TVARIABLE(IntPtrT, element_size);
@@ -1105,7 +1100,7 @@ void TypedArrayBuiltinsAssembler::SetJSArraySource(
     };
     STATIC_ASSERT(arraysize(values) == arraysize(labels));
 
-    TNode<Int32T> source_elements_kind = LoadMapElementsKind(LoadMap(source));
+    TNode<Int32T> source_elements_kind = LoadElementsKind(source);
     Switch(source_elements_kind, call_runtime, values, labels,
            arraysize(values));
   }
@@ -1202,27 +1197,6 @@ void TypedArrayBuiltinsAssembler::DispatchTypedArrayByElementsKind(
   Unreachable();
 
   BIND(&next);
-}
-
-TNode<BoolT> TypedArrayBuiltinsAssembler::NumberIsNaN(TNode<Number> value) {
-  Label is_heapnumber(this), done(this);
-  TVARIABLE(BoolT, result);
-
-  GotoIf(TaggedIsNotSmi(value), &is_heapnumber);
-  result = Int32FalseConstant();
-  Goto(&done);
-
-  BIND(&is_heapnumber);
-  {
-    CSA_ASSERT(this, IsHeapNumber(CAST(value)));
-
-    TNode<Float64T> value_f = LoadHeapNumberValue(CAST(value));
-    result = Float64NotEqual(value_f, value_f);
-    Goto(&done);
-  }
-
-  BIND(&done);
-  return result.value();
 }
 
 // ES #sec-get-%typedarray%.prototype.set
@@ -1528,7 +1502,7 @@ TF_BUILTIN(TypedArrayPrototypeToStringTag, TypedArrayBuiltinsAssembler) {
   // performance.
   BIND(&if_receiverisheapobject);
   Node* elements_kind =
-      Int32Sub(LoadMapElementsKind(LoadMap(receiver)),
+      Int32Sub(LoadElementsKind(receiver),
                Int32Constant(FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND));
   Switch(elements_kind, &return_undefined, elements_kinds, elements_kind_labels,
          kTypedElementsKindCount);

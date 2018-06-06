@@ -85,6 +85,101 @@ struct IteratorRecord {
   compiler::TNode<Object> next;
 };
 
+#define CSA_CHECK(csa, x)                                        \
+  (csa)->Check(                                                  \
+      [&]() -> compiler::Node* {                                 \
+        return implicit_cast<compiler::SloppyTNode<Word32T>>(x); \
+      },                                                         \
+      #x, __FILE__, __LINE__)
+
+#ifdef DEBUG
+// Add stringified versions to the given values, except the first. That is,
+// transform
+//   x, a, b, c, d, e, f
+// to
+//   a, "a", b, "b", c, "c", d, "d", e, "e", f, "f"
+//
+// __VA_ARGS__  is ignored to allow the caller to pass through too many
+// parameters, and the first element is ignored to support having no extra
+// values without empty __VA_ARGS__ (which cause all sorts of problems with
+// extra commas).
+#define CSA_ASSERT_STRINGIFY_EXTRA_VALUES_5(_, v1, v2, v3, v4, v5, ...) \
+  v1, #v1, v2, #v2, v3, #v3, v4, #v4, v5, #v5
+
+// Stringify the given variable number of arguments. The arguments are trimmed
+// to 5 if there are too many, and padded with nullptr if there are not enough.
+#define CSA_ASSERT_STRINGIFY_EXTRA_VALUES(...)                                \
+  CSA_ASSERT_STRINGIFY_EXTRA_VALUES_5(__VA_ARGS__, nullptr, nullptr, nullptr, \
+                                      nullptr, nullptr)
+
+#define CSA_ASSERT_GET_FIRST(x, ...) (x)
+#define CSA_ASSERT_GET_FIRST_STR(x, ...) #x
+
+// CSA_ASSERT(csa, <condition>, <extra values to print...>)
+
+// We have to jump through some hoops to allow <extra values to print...> to be
+// empty.
+#define CSA_ASSERT(csa, ...)                                             \
+  (csa)->Assert(                                                         \
+      [&]() -> compiler::Node* {                                         \
+        return implicit_cast<compiler::SloppyTNode<Word32T>>(            \
+            EXPAND(CSA_ASSERT_GET_FIRST(__VA_ARGS__)));                  \
+      },                                                                 \
+      EXPAND(CSA_ASSERT_GET_FIRST_STR(__VA_ARGS__)), __FILE__, __LINE__, \
+      CSA_ASSERT_STRINGIFY_EXTRA_VALUES(__VA_ARGS__))
+
+// CSA_ASSERT_BRANCH(csa, [](Label* ok, Label* not_ok) {...},
+//     <extra values to print...>)
+
+#define CSA_ASSERT_BRANCH(csa, ...)                                      \
+  (csa)->Assert(EXPAND(CSA_ASSERT_GET_FIRST(__VA_ARGS__)),               \
+                EXPAND(CSA_ASSERT_GET_FIRST_STR(__VA_ARGS__)), __FILE__, \
+                __LINE__, CSA_ASSERT_STRINGIFY_EXTRA_VALUES(__VA_ARGS__))
+
+#define CSA_ASSERT_JS_ARGC_OP(csa, Op, op, expected)                     \
+  (csa)->Assert(                                                         \
+      [&]() -> compiler::Node* {                                         \
+        compiler::Node* const argc =                                     \
+            (csa)->Parameter(Descriptor::kActualArgumentsCount);         \
+        return (csa)->Op(argc, (csa)->Int32Constant(expected));          \
+      },                                                                 \
+      "argc " #op " " #expected, __FILE__, __LINE__,                     \
+      SmiFromInt32((csa)->Parameter(Descriptor::kActualArgumentsCount)), \
+      "argc")
+
+#define CSA_ASSERT_JS_ARGC_EQ(csa, expected) \
+  CSA_ASSERT_JS_ARGC_OP(csa, Word32Equal, ==, expected)
+
+#define CSA_DEBUG_INFO(name) \
+  { #name, __FILE__, __LINE__ }
+#define BIND(label) Bind(label, CSA_DEBUG_INFO(label))
+#define VARIABLE(name, ...) \
+  Variable name(this, CSA_DEBUG_INFO(name), __VA_ARGS__)
+#define VARIABLE_CONSTRUCTOR(name, ...) \
+  name(this, CSA_DEBUG_INFO(name), __VA_ARGS__)
+#define TYPED_VARIABLE_DEF(type, name, ...) \
+  TVariable<type> name(CSA_DEBUG_INFO(name), __VA_ARGS__)
+#else  // DEBUG
+#define CSA_ASSERT(csa, ...) ((void)0)
+#define CSA_ASSERT_BRANCH(csa, ...) ((void)0)
+#define CSA_ASSERT_JS_ARGC_EQ(csa, expected) ((void)0)
+#define BIND(label) Bind(label)
+#define VARIABLE(name, ...) Variable name(this, __VA_ARGS__)
+#define VARIABLE_CONSTRUCTOR(name, ...) name(this, __VA_ARGS__)
+#define TYPED_VARIABLE_DEF(type, name, ...) TVariable<type> name(__VA_ARGS__)
+#endif  // DEBUG
+
+#define TVARIABLE(...) EXPAND(TYPED_VARIABLE_DEF(__VA_ARGS__, this))
+
+#ifdef ENABLE_SLOW_DCHECKS
+#define CSA_SLOW_ASSERT(csa, ...) \
+  if (FLAG_enable_slow_asserts) { \
+    CSA_ASSERT(csa, __VA_ARGS__); \
+  }
+#else
+#define CSA_SLOW_ASSERT(csa, ...) ((void)0)
+#endif
+
 // Provides JavaScript-specific "macro-assembler" functionality on top of the
 // CodeAssembler. By factoring the JavaScript-isms out of the CodeAssembler,
 // it's possible to add JavaScript-specific useful CodeAssembler "macros"
@@ -115,6 +210,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   typedef base::Flags<AllocationFlag> AllocationFlags;
 
   enum ParameterMode { SMI_PARAMETERS, INTPTR_PARAMETERS };
+
   // On 32-bit platforms, there is a slight performance advantage to doing all
   // of the array offset/index arithmetic with SMIs, since it's possible
   // to save a few tag/untag operations without paying an extra expense when
@@ -193,6 +289,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
     GotoIfNot(IsCallable(result), fail);
     return CAST(result);
   }
+
+  // Returns true iff number is NaN.
+  // TOOD(szuend): Remove when UncheckedCasts are supported in Torque.
+  TNode<BoolT> NumberIsNaN(TNode<Number> number);
 
   Node* MatchesParameterMode(Node* value, ParameterMode mode);
 
@@ -273,6 +373,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                                         TNode<Object> index,
                                         TNode<IntPtrT> length);
 
+  // Returns true iff the given value fits into smi range and is >= 0.
+  TNode<BoolT> IsValidPositiveSmi(TNode<IntPtrT> value);
+
   // Tag an IntPtr as a Smi value.
   TNode<Smi> SmiTag(SloppyTNode<IntPtrT> value);
   // Untag a Smi value as an IntPtr.
@@ -286,15 +389,26 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   TNode<Int32T> SmiToInt32(SloppyTNode<Smi> value);
 
   // Smi operations.
-#define SMI_ARITHMETIC_BINOP(SmiOpName, IntPtrOpName)                  \
-  TNode<Smi> SmiOpName(TNode<Smi> a, TNode<Smi> b) {                   \
-    return BitcastWordToTaggedSigned(                                  \
-        IntPtrOpName(BitcastTaggedToWord(a), BitcastTaggedToWord(b))); \
+#define SMI_ARITHMETIC_BINOP(SmiOpName, IntPtrOpName, Int32OpName)       \
+  TNode<Smi> SmiOpName(TNode<Smi> a, TNode<Smi> b) {                     \
+    if (SmiValuesAre32Bits()) {                                          \
+      return BitcastWordToTaggedSigned(                                  \
+          IntPtrOpName(BitcastTaggedToWord(a), BitcastTaggedToWord(b))); \
+    } else {                                                             \
+      DCHECK(SmiValuesAre31Bits());                                      \
+      if (kPointerSize == kInt64Size) {                                  \
+        CSA_ASSERT(this, IsValidSmi(a));                                 \
+        CSA_ASSERT(this, IsValidSmi(b));                                 \
+      }                                                                  \
+      return BitcastWordToTaggedSigned(ChangeInt32ToIntPtr(              \
+          Int32OpName(TruncateIntPtrToInt32(BitcastTaggedToWord(a)),     \
+                      TruncateIntPtrToInt32(BitcastTaggedToWord(b)))));  \
+    }                                                                    \
   }
-  SMI_ARITHMETIC_BINOP(SmiAdd, IntPtrAdd)
-  SMI_ARITHMETIC_BINOP(SmiSub, IntPtrSub)
-  SMI_ARITHMETIC_BINOP(SmiAnd, WordAnd)
-  SMI_ARITHMETIC_BINOP(SmiOr, WordOr)
+  SMI_ARITHMETIC_BINOP(SmiAdd, IntPtrAdd, Int32Add)
+  SMI_ARITHMETIC_BINOP(SmiSub, IntPtrSub, Int32Sub)
+  SMI_ARITHMETIC_BINOP(SmiAnd, WordAnd, Word32And)
+  SMI_ARITHMETIC_BINOP(SmiOr, WordOr, Word32Or)
 #undef SMI_ARITHMETIC_BINOP
 
   TNode<Smi> TrySmiAdd(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
@@ -328,19 +442,32 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
     }
   }
 
-#define SMI_COMPARISON_OP(SmiOpName, IntPtrOpName)                       \
-  TNode<BoolT> SmiOpName(TNode<Smi> a, TNode<Smi> b) {                   \
-    return IntPtrOpName(BitcastTaggedToWord(a), BitcastTaggedToWord(b)); \
+#define SMI_COMPARISON_OP(SmiOpName, IntPtrOpName, Int32OpName)            \
+  TNode<BoolT> SmiOpName(TNode<Smi> a, TNode<Smi> b) {                     \
+    if (SmiValuesAre32Bits()) {                                            \
+      return IntPtrOpName(BitcastTaggedToWord(a), BitcastTaggedToWord(b)); \
+    } else {                                                               \
+      DCHECK(SmiValuesAre31Bits());                                        \
+      if (kPointerSize == kInt64Size) {                                    \
+        CSA_ASSERT(this, IsValidSmi(a));                                   \
+        CSA_ASSERT(this, IsValidSmi(b));                                   \
+      }                                                                    \
+      return Int32OpName(TruncateIntPtrToInt32(BitcastTaggedToWord(a)),    \
+                         TruncateIntPtrToInt32(BitcastTaggedToWord(b)));   \
+    }                                                                      \
   }
-  SMI_COMPARISON_OP(SmiEqual, WordEqual)
-  SMI_COMPARISON_OP(SmiNotEqual, WordNotEqual)
-  SMI_COMPARISON_OP(SmiAbove, UintPtrGreaterThan)
-  SMI_COMPARISON_OP(SmiAboveOrEqual, UintPtrGreaterThanOrEqual)
-  SMI_COMPARISON_OP(SmiBelow, UintPtrLessThan)
-  SMI_COMPARISON_OP(SmiLessThan, IntPtrLessThan)
-  SMI_COMPARISON_OP(SmiLessThanOrEqual, IntPtrLessThanOrEqual)
-  SMI_COMPARISON_OP(SmiGreaterThan, IntPtrGreaterThan)
-  SMI_COMPARISON_OP(SmiGreaterThanOrEqual, IntPtrGreaterThanOrEqual)
+  SMI_COMPARISON_OP(SmiEqual, WordEqual, Word32Equal)
+  SMI_COMPARISON_OP(SmiNotEqual, WordNotEqual, Word32NotEqual)
+  SMI_COMPARISON_OP(SmiAbove, UintPtrGreaterThan, Uint32GreaterThan)
+  SMI_COMPARISON_OP(SmiAboveOrEqual, UintPtrGreaterThanOrEqual,
+                    Uint32GreaterThanOrEqual)
+  SMI_COMPARISON_OP(SmiBelow, UintPtrLessThan, Uint32LessThan)
+  SMI_COMPARISON_OP(SmiLessThan, IntPtrLessThan, Int32LessThan)
+  SMI_COMPARISON_OP(SmiLessThanOrEqual, IntPtrLessThanOrEqual,
+                    Int32LessThanOrEqual)
+  SMI_COMPARISON_OP(SmiGreaterThan, IntPtrGreaterThan, Int32GreaterThan)
+  SMI_COMPARISON_OP(SmiGreaterThanOrEqual, IntPtrGreaterThanOrEqual,
+                    Int32GreaterThanOrEqual)
 #undef SMI_COMPARISON_OP
   TNode<Smi> SmiMax(TNode<Smi> a, TNode<Smi> b);
   TNode<Smi> SmiMin(TNode<Smi> a, TNode<Smi> b);
@@ -622,6 +749,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   TNode<Int32T> LoadMapInstanceType(SloppyTNode<Map> map);
   // Load the ElementsKind of a map.
   TNode<Int32T> LoadMapElementsKind(SloppyTNode<Map> map);
+  TNode<Int32T> LoadElementsKind(SloppyTNode<HeapObject> map);
   // Load the instance descriptors of a map.
   TNode<DescriptorArray> LoadMapDescriptors(SloppyTNode<Map> map);
   // Load the prototype of a map.
@@ -709,6 +837,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                                  TNode<Object> value);
   TNode<BoolT> IsNotWeakReferenceTo(TNode<MaybeObject> object,
                                     TNode<Object> value);
+  TNode<BoolT> IsStrongReferenceTo(TNode<MaybeObject> object,
+                                   TNode<Object> value);
 
   TNode<MaybeObject> MakeWeak(TNode<HeapObject> value);
 
@@ -793,6 +923,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
       MachineType machine_type, int additional_offset = 0,
       ParameterMode parameter_mode = INTPTR_PARAMETERS,
       Label* if_hole = nullptr);
+
+  Node* LoadFixedDoubleArrayElement(TNode<FixedDoubleArray> object,
+                                    TNode<Smi> index) {
+    return LoadFixedDoubleArrayElement(object, index, MachineType::Float64(), 0,
+                                       SMI_PARAMETERS);
+  }
 
   // Load a feedback slot from a FeedbackVector.
   TNode<MaybeObject> LoadFeedbackVectorSlot(
@@ -1098,15 +1234,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
       AllocationFlags flags = kNone,
       SloppyTNode<Map> fixed_array_map = nullptr);
 
-  TNode<FixedArray> AllocateFixedArray(ElementsKind kind, TNode<Smi> capacity,
-                                       AllocationFlags flags = kNone) {
-    return AllocateFixedArray(kind, capacity, SMI_PARAMETERS, flags);
-  }
-
-  TNode<FixedArray> AllocateFixedArray(ElementsKind kind, TNode<Smi> capacity,
-                                       TNode<Map> map,
-                                       AllocationFlags flags = kNone) {
-    return AllocateFixedArray(kind, capacity, SMI_PARAMETERS, flags, map);
+  TNode<FixedArray> AllocateFixedArray(
+      ElementsKind kind, TNode<IntPtrT> capacity, AllocationFlags flags,
+      SloppyTNode<Map> fixed_array_map = nullptr) {
+    return AllocateFixedArray(kind, capacity, INTPTR_PARAMETERS, flags,
+                              fixed_array_map);
   }
 
   Node* AllocatePropertyArray(Node* capacity,
@@ -1786,6 +1918,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   // Returns an untagged int32.
   template <class ContainerType>
   TNode<Uint32T> LoadDetailsByKeyIndex(Node* container, Node* key_index) {
+    static_assert(!std::is_same<ContainerType, DescriptorArray>::value,
+                  "Use the non-templatized version for DescriptorArray");
     const int kKeyToDetailsOffset =
         (ContainerType::kEntryDetailsIndex - ContainerType::kEntryKeyIndex) *
         kPointerSize;
@@ -1797,12 +1931,21 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   // Returns a tagged value.
   template <class ContainerType>
   TNode<Object> LoadValueByKeyIndex(Node* container, Node* key_index) {
+    static_assert(!std::is_same<ContainerType, DescriptorArray>::value,
+                  "Use the non-templatized version for DescriptorArray");
     const int kKeyToValueOffset =
         (ContainerType::kEntryValueIndex - ContainerType::kEntryKeyIndex) *
         kPointerSize;
     return UncheckedCast<Object>(
         LoadFixedArrayElement(container, key_index, kKeyToValueOffset));
   }
+
+  TNode<Uint32T> LoadDetailsByKeyIndex(TNode<DescriptorArray> container,
+                                       TNode<IntPtrT> key_index);
+  TNode<Object> LoadValueByKeyIndex(TNode<DescriptorArray> container,
+                                    TNode<IntPtrT> key_index);
+  TNode<MaybeObject> LoadFieldTypeByKeyIndex(TNode<DescriptorArray> container,
+                                             TNode<IntPtrT> key_index);
 
   // Stores the details for the entry with the given key_index.
   // |details| must be a Smi.
@@ -1970,11 +2113,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
         TailCallStub(Builtins::CallableFor(isolate(), id), context, args...));
   }
 
-  void LoadPropertyFromFastObject(Node* object, Node* map, Node* descriptors,
+  void LoadPropertyFromFastObject(Node* object, Node* map,
+                                  TNode<DescriptorArray> descriptors,
                                   Node* name_index, Variable* var_details,
                                   Variable* var_value);
 
-  void LoadPropertyFromFastObject(Node* object, Node* map, Node* descriptors,
+  void LoadPropertyFromFastObject(Node* object, Node* map,
+                                  TNode<DescriptorArray> descriptors,
                                   Node* name_index, Node* details,
                                   Variable* var_value);
 
@@ -2300,6 +2445,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   Node* IsDetachedBuffer(Node* buffer);
   TNode<JSArrayBuffer> LoadArrayBufferViewBuffer(
       TNode<JSArrayBufferView> array_buffer_view);
+  TNode<RawPtrT> LoadArrayBufferBackingStore(TNode<JSArrayBuffer> array_buffer);
 
   TNode<IntPtrT> ElementOffsetFromIndex(Node* index, ElementsKind kind,
                                         ParameterMode mode, int base_size = 0);
@@ -2320,7 +2466,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                                           Node* context);
 
   // Promise helpers
-  Node* IsPromiseHookEnabledOrDebugIsActive();
+  Node* IsPromiseHookEnabled();
+  Node* HasAsyncEventDelegate();
+  Node* IsPromiseHookEnabledOrHasAsyncEventDelegate();
 
   // Helpers for StackFrame markers.
   Node* MarkerIsFrameType(Node* marker_or_function,
@@ -2335,8 +2483,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   TNode<IntPtrT> GetArgumentsLength(CodeStubArguments* args);
   TNode<Object> GetArgumentValue(CodeStubArguments* args, TNode<IntPtrT> index);
-  TNode<Object> GetArgumentValueSmiIndex(CodeStubArguments* args,
-                                         TNode<Smi> index);
 
   // Support for printf-style debugging
   void Print(const char* s);
@@ -2455,6 +2601,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                                      Node* allocation_site,
                                      Node* size_in_bytes);
 
+  TNode<BoolT> IsValidSmi(TNode<Smi> smi);
   Node* SmiShiftBitsConstant();
 
   // Emits keyed sloppy arguments load if the |value| is nullptr or store
@@ -2644,100 +2791,6 @@ class ToDirectStringAssembler : public CodeStubAssembler {
   const Flags flags_;
 };
 
-#define CSA_CHECK(csa, x)                                        \
-  (csa)->Check(                                                  \
-      [&]() -> compiler::Node* {                                 \
-        return implicit_cast<compiler::SloppyTNode<Word32T>>(x); \
-      },                                                         \
-      #x, __FILE__, __LINE__)
-
-#ifdef DEBUG
-// Add stringified versions to the given values, except the first. That is,
-// transform
-//   x, a, b, c, d, e, f
-// to
-//   a, "a", b, "b", c, "c", d, "d", e, "e", f, "f"
-//
-// __VA_ARGS__  is ignored to allow the caller to pass through too many
-// parameters, and the first element is ignored to support having no extra
-// values without empty __VA_ARGS__ (which cause all sorts of problems with
-// extra commas).
-#define CSA_ASSERT_STRINGIFY_EXTRA_VALUES_5(_, v1, v2, v3, v4, v5, ...) \
-  v1, #v1, v2, #v2, v3, #v3, v4, #v4, v5, #v5
-
-// Stringify the given variable number of arguments. The arguments are trimmed
-// to 5 if there are too many, and padded with nullptr if there are not enough.
-#define CSA_ASSERT_STRINGIFY_EXTRA_VALUES(...)                                \
-  CSA_ASSERT_STRINGIFY_EXTRA_VALUES_5(__VA_ARGS__, nullptr, nullptr, nullptr, \
-                                      nullptr, nullptr)
-
-#define CSA_ASSERT_GET_FIRST(x, ...) (x)
-#define CSA_ASSERT_GET_FIRST_STR(x, ...) #x
-
-// CSA_ASSERT(csa, <condition>, <extra values to print...>)
-
-// We have to jump through some hoops to allow <extra values to print...> to be
-// empty.
-#define CSA_ASSERT(csa, ...)                                             \
-  (csa)->Assert(                                                         \
-      [&]() -> compiler::Node* {                                         \
-        return implicit_cast<compiler::SloppyTNode<Word32T>>(            \
-            EXPAND(CSA_ASSERT_GET_FIRST(__VA_ARGS__)));                  \
-      },                                                                 \
-      EXPAND(CSA_ASSERT_GET_FIRST_STR(__VA_ARGS__)), __FILE__, __LINE__, \
-      CSA_ASSERT_STRINGIFY_EXTRA_VALUES(__VA_ARGS__))
-
-// CSA_ASSERT_BRANCH(csa, [](Label* ok, Label* not_ok) {...},
-//     <extra values to print...>)
-
-#define CSA_ASSERT_BRANCH(csa, ...)                                      \
-  (csa)->Assert(EXPAND(CSA_ASSERT_GET_FIRST(__VA_ARGS__)),               \
-                EXPAND(CSA_ASSERT_GET_FIRST_STR(__VA_ARGS__)), __FILE__, \
-                __LINE__, CSA_ASSERT_STRINGIFY_EXTRA_VALUES(__VA_ARGS__))
-
-#define CSA_ASSERT_JS_ARGC_OP(csa, Op, op, expected)                     \
-  (csa)->Assert(                                                         \
-      [&]() -> compiler::Node* {                                         \
-        compiler::Node* const argc =                                     \
-            (csa)->Parameter(Descriptor::kActualArgumentsCount);         \
-        return (csa)->Op(argc, (csa)->Int32Constant(expected));          \
-      },                                                                 \
-      "argc " #op " " #expected, __FILE__, __LINE__,                     \
-      SmiFromInt32((csa)->Parameter(Descriptor::kActualArgumentsCount)), \
-      "argc")
-
-#define CSA_ASSERT_JS_ARGC_EQ(csa, expected) \
-  CSA_ASSERT_JS_ARGC_OP(csa, Word32Equal, ==, expected)
-
-#define CSA_DEBUG_INFO(name) \
-  { #name, __FILE__, __LINE__ }
-#define BIND(label) Bind(label, CSA_DEBUG_INFO(label))
-#define VARIABLE(name, ...) \
-  Variable name(this, CSA_DEBUG_INFO(name), __VA_ARGS__)
-#define VARIABLE_CONSTRUCTOR(name, ...) \
-  name(this, CSA_DEBUG_INFO(name), __VA_ARGS__)
-#define TYPED_VARIABLE_DEF(type, name, ...) \
-  TVariable<type> name(CSA_DEBUG_INFO(name), __VA_ARGS__)
-#else  // DEBUG
-#define CSA_ASSERT(csa, ...) ((void)0)
-#define CSA_ASSERT_BRANCH(csa, ...) ((void)0)
-#define CSA_ASSERT_JS_ARGC_EQ(csa, expected) ((void)0)
-#define BIND(label) Bind(label)
-#define VARIABLE(name, ...) Variable name(this, __VA_ARGS__)
-#define VARIABLE_CONSTRUCTOR(name, ...) name(this, __VA_ARGS__)
-#define TYPED_VARIABLE_DEF(type, name, ...) TVariable<type> name(__VA_ARGS__)
-#endif  // DEBUG
-
-#define TVARIABLE(...) EXPAND(TYPED_VARIABLE_DEF(__VA_ARGS__, this))
-
-#ifdef ENABLE_SLOW_DCHECKS
-#define CSA_SLOW_ASSERT(csa, ...) \
-  if (FLAG_enable_slow_asserts) { \
-    CSA_ASSERT(csa, __VA_ARGS__); \
-  }
-#else
-#define CSA_SLOW_ASSERT(csa, ...) ((void)0)
-#endif
 
 DEFINE_OPERATORS_FOR_FLAGS(CodeStubAssembler::AllocationFlags);
 

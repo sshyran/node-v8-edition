@@ -266,7 +266,7 @@ TNode<JSArray> ObjectEntriesValuesBuiltinsAssembler::FastGetOwnValuesOrEntries(
     TNode<Context> context, TNode<JSObject> object,
     Label* if_call_runtime_with_fast_path, Label* if_no_properties,
     CollectType collect_type) {
-  Node* native_context = LoadNativeContext(context);
+  TNode<Context> native_context = LoadNativeContext(context);
   TNode<Map> array_map =
       LoadJSArrayElementsMap(PACKED_ELEMENTS, native_context);
   TNode<Map> map = LoadMap(object);
@@ -274,9 +274,9 @@ TNode<JSArray> ObjectEntriesValuesBuiltinsAssembler::FastGetOwnValuesOrEntries(
 
   Label if_has_enum_cache(this), if_not_has_enum_cache(this),
       collect_entries(this);
-  Node* object_enum_length =
-      DecodeWordFromWord32<Map::EnumLengthBits>(bit_field3);
-  Node* has_enum_cache = WordNotEqual(
+  TNode<IntPtrT> object_enum_length =
+      Signed(DecodeWordFromWord32<Map::EnumLengthBits>(bit_field3));
+  TNode<BoolT> has_enum_cache = WordNotEqual(
       object_enum_length, IntPtrConstant(kInvalidEnumCacheSentinel));
 
   // In case, we found enum_cache in object,
@@ -292,9 +292,8 @@ TNode<JSArray> ObjectEntriesValuesBuiltinsAssembler::FastGetOwnValuesOrEntries(
   BIND(&if_has_enum_cache);
   {
     GotoIf(WordEqual(object_enum_length, IntPtrConstant(0)), if_no_properties);
-    TNode<FixedArray> values_or_entries = TNode<FixedArray>::UncheckedCast(
-        AllocateFixedArray(PACKED_ELEMENTS, object_enum_length,
-                           INTPTR_PARAMETERS, kAllowLargeObjectAllocation));
+    TNode<FixedArray> values_or_entries = AllocateFixedArray(
+        PACKED_ELEMENTS, object_enum_length, kAllowLargeObjectAllocation);
 
     // If in case we have enum_cache,
     // we can't detect accessor of object until loop through descriptors.
@@ -342,8 +341,7 @@ TNode<JSArray> ObjectEntriesValuesBuiltinsAssembler::FastGetOwnValuesOrEntries(
       // the next descriptor.
       GotoIfNot(IsPropertyEnumerable(details), &next_descriptor);
 
-      VARIABLE(var_property_value, MachineRepresentation::kTagged,
-               UndefinedConstant());
+      TVARIABLE(Object, var_property_value, UndefinedConstant());
       TNode<IntPtrT> descriptor_name_index = ToKeyIndex<DescriptorArray>(
           Unsigned(TruncateIntPtrToInt32(var_descriptor_number.value())));
 
@@ -353,7 +351,7 @@ TNode<JSArray> ObjectEntriesValuesBuiltinsAssembler::FastGetOwnValuesOrEntries(
                                  &var_property_value);
 
       // If kind is "value", append value to properties.
-      Node* value = var_property_value.value();
+      TNode<Object> value = var_property_value.value();
 
       if (collect_type == CollectType::kEntries) {
         // Let entry be CreateArrayFromList(« key, value »).
@@ -364,7 +362,7 @@ TNode<JSArray> ObjectEntriesValuesBuiltinsAssembler::FastGetOwnValuesOrEntries(
             IntPtrConstant(2));
         StoreFixedArrayElement(elements, 0, next_key, SKIP_WRITE_BARRIER);
         StoreFixedArrayElement(elements, 1, value, SKIP_WRITE_BARRIER);
-        value = array;
+        value = TNode<JSArray>::UncheckedCast(array);
       }
 
       StoreFixedArrayElement(values_or_entries, var_result_index.value(),
@@ -583,8 +581,8 @@ void ObjectBuiltinsAssembler::ObjectAssignFast(TNode<Context> context,
   DescriptorArrayForEach(
       list, Unsigned(Int32Constant(0)), nof_descriptors,
       [=, &var_stable](TNode<UintPtrT> descriptor_key_index) {
-        TNode<Name> next_key =
-            CAST(LoadFixedArrayElement(from_descriptors, descriptor_key_index));
+        TNode<Name> next_key = CAST(
+            LoadWeakFixedArrayElement(from_descriptors, descriptor_key_index));
 
         TVARIABLE(Object, var_value, SmiConstant(0));
         Label do_store(this), next_iteration(this);
@@ -622,12 +620,11 @@ void ObjectBuiltinsAssembler::ObjectAssignFast(TNode<Context> context,
 
           BIND(&if_found_fast);
           {
-            Node* descriptors = var_meta_storage.value();
-            Node* name_index = var_entry.value();
+            TNode<DescriptorArray> descriptors = CAST(var_meta_storage.value());
+            TNode<IntPtrT> name_index = var_entry.value();
 
             // Skip non-enumerable properties.
-            var_details =
-                LoadDetailsByKeyIndex<DescriptorArray>(descriptors, name_index);
+            var_details = LoadDetailsByKeyIndex(descriptors, name_index);
             GotoIf(IsSetWord32(var_details.value(),
                                PropertyDetails::kAttributesDontEnumMask),
                    &next_iteration);
@@ -1168,10 +1165,10 @@ TF_BUILTIN(CreateObjectWithoutProperties, ObjectBuiltinsAssembler) {
     Comment("Try loading the prototype info");
     Node* prototype_info =
         LoadMapPrototypeInfo(LoadMap(prototype), &call_runtime);
-    Node* weak_cell =
-        LoadObjectField(prototype_info, PrototypeInfo::kObjectCreateMap);
-    GotoIf(IsUndefined(weak_cell), &call_runtime);
-    map.Bind(LoadWeakCellValue(weak_cell, &call_runtime));
+    TNode<MaybeObject> maybe_map = LoadMaybeWeakObjectField(
+        prototype_info, PrototypeInfo::kObjectCreateMapOffset);
+    GotoIf(IsStrongReferenceTo(maybe_map, UndefinedConstant()), &call_runtime);
+    map.Bind(ToWeakHeapObject(maybe_map, &call_runtime));
     Goto(&instantiate_map);
   }
 
@@ -1263,10 +1260,11 @@ TF_BUILTIN(ObjectCreate, ObjectBuiltinsAssembler) {
       Node* prototype_info =
           LoadMapPrototypeInfo(LoadMap(prototype), &call_runtime);
       Comment("Load ObjectCreateMap from PrototypeInfo");
-      Node* weak_cell =
-          LoadObjectField(prototype_info, PrototypeInfo::kObjectCreateMap);
-      GotoIf(IsUndefined(weak_cell), &call_runtime);
-      map.Bind(LoadWeakCellValue(weak_cell, &call_runtime));
+      TNode<MaybeObject> maybe_map = LoadMaybeWeakObjectField(
+          prototype_info, PrototypeInfo::kObjectCreateMapOffset);
+      GotoIf(IsStrongReferenceTo(maybe_map, UndefinedConstant()),
+             &call_runtime);
+      map.Bind(ToWeakHeapObject(maybe_map, &call_runtime));
       Goto(&instantiate_map);
     }
 
@@ -1368,7 +1366,7 @@ TF_BUILTIN(CreateGeneratorObject, ObjectBuiltinsAssembler) {
 
   Node* formal_parameter_count = ChangeInt32ToIntPtr(
       LoadObjectField(shared, SharedFunctionInfo::kFormalParameterCountOffset,
-                      MachineType::Int32()));
+                      MachineType::Uint16()));
   Node* frame_size = ChangeInt32ToIntPtr(LoadObjectField(
       bytecode_array, BytecodeArray::kFrameSizeOffset, MachineType::Int32()));
   Node* size = IntPtrAdd(WordSar(frame_size, IntPtrConstant(kPointerSizeLog2)),

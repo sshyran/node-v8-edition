@@ -116,6 +116,8 @@ PRIMITIVE_ACCESSORS(WasmInstanceObject, memory_size, uint32_t,
                     kMemorySizeOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, memory_mask, uint32_t,
                     kMemoryMaskOffset)
+PRIMITIVE_ACCESSORS(WasmInstanceObject, stack_limit_address, Address,
+                    kStackLimitAddressOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, imported_function_targets, Address*,
                     kImportedFunctionTargetsOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, globals_start, byte*,
@@ -157,6 +159,7 @@ OPTIONAL_ACCESSORS(WasmInstanceObject, managed_indirect_patcher, Foreign,
                    kManagedIndirectPatcherOffset)
 ACCESSORS(WasmInstanceObject, undefined_value, Oddball, kUndefinedValueOffset)
 ACCESSORS(WasmInstanceObject, null_value, Oddball, kNullValueOffset)
+ACCESSORS(WasmInstanceObject, centry_stub, Code, kCEntryStubOffset)
 
 inline bool WasmInstanceObject::has_indirect_function_table() {
   return indirect_function_table_sig_ids() != nullptr;

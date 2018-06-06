@@ -290,9 +290,11 @@ class WasmInstanceObject : public JSObject {
   DECL_OPTIONAL_ACCESSORS(managed_indirect_patcher, Foreign)
   DECL_ACCESSORS(undefined_value, Oddball)
   DECL_ACCESSORS(null_value, Oddball)
+  DECL_ACCESSORS(centry_stub, Code)
   DECL_PRIMITIVE_ACCESSORS(memory_start, byte*)
   DECL_PRIMITIVE_ACCESSORS(memory_size, uint32_t)
   DECL_PRIMITIVE_ACCESSORS(memory_mask, uint32_t)
+  DECL_PRIMITIVE_ACCESSORS(stack_limit_address, Address);
   DECL_PRIMITIVE_ACCESSORS(imported_function_targets, Address*)
   DECL_PRIMITIVE_ACCESSORS(globals_start, byte*)
   DECL_PRIMITIVE_ACCESSORS(imported_mutable_globals, Address*)
@@ -322,10 +324,12 @@ class WasmInstanceObject : public JSObject {
   V(kManagedIndirectPatcherOffset, kPointerSize)                        \
   V(kUndefinedValueOffset, kPointerSize)                                \
   V(kNullValueOffset, kPointerSize)                                     \
+  V(kCEntryStubOffset, kPointerSize)                                    \
   V(kFirstUntaggedOffset, 0)                             /* marker */   \
   V(kMemoryStartOffset, kPointerSize)                    /* untagged */ \
   V(kMemorySizeOffset, kUInt32Size)                      /* untagged */ \
   V(kMemoryMaskOffset, kUInt32Size)                      /* untagged */ \
+  V(kStackLimitAddressOffset, kPointerSize)              /* untagged */ \
   V(kImportedFunctionTargetsOffset, kPointerSize)        /* untagged */ \
   V(kGlobalsStartOffset, kPointerSize)                   /* untagged */ \
   V(kImportedMutableGlobalsOffset, kPointerSize)         /* untagged */ \

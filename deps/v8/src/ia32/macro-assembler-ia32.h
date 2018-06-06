@@ -205,6 +205,10 @@ class TurboAssembler : public Assembler {
   // may be bigger than 2^16 - 1.  Requires a scratch register.
   void Ret(int bytes_dropped, Register scratch);
 
+  void Pshufhw(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
+    Pshufhw(dst, Operand(src), shuffle);
+  }
+  void Pshufhw(XMMRegister dst, Operand src, uint8_t shuffle);
   void Pshuflw(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
     Pshuflw(dst, Operand(src), shuffle);
   }
@@ -275,6 +279,10 @@ class TurboAssembler : public Assembler {
 
   void Pshufb(XMMRegister dst, XMMRegister src) { Pshufb(dst, Operand(src)); }
   void Pshufb(XMMRegister dst, Operand src);
+  void Pblendw(XMMRegister dst, XMMRegister src, uint8_t imm8) {
+    Pblendw(dst, Operand(src), imm8);
+  }
+  void Pblendw(XMMRegister dst, Operand src, uint8_t imm8);
 
   void Psignb(XMMRegister dst, XMMRegister src) { Psignb(dst, Operand(src)); }
   void Psignb(XMMRegister dst, Operand src);
@@ -362,11 +370,16 @@ class TurboAssembler : public Assembler {
   bool root_array_available() const { return root_array_available_; }
   void set_root_array_available(bool v) { root_array_available_ = v; }
 
+  void set_builtin_index(int builtin_index) {
+    maybe_builtin_index_ = builtin_index;
+  }
+
  protected:
   // This handle will be patched with the code object on installation.
   Handle<HeapObject> code_object_;
 
  private:
+  int maybe_builtin_index_ = -1;  // May be set while generating builtins.
   bool has_frame_ = false;
   bool root_array_available_ = false;
   Isolate* const isolate_;

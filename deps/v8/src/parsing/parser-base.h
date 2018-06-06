@@ -282,7 +282,6 @@ class ParserBase {
         allow_harmony_static_fields_(false),
         allow_harmony_dynamic_import_(false),
         allow_harmony_import_meta_(false),
-        allow_harmony_optional_catch_binding_(false),
         allow_harmony_private_fields_(false),
         allow_eval_cache_(true) {}
 
@@ -296,7 +295,6 @@ class ParserBase {
   ALLOW_ACCESSORS(harmony_static_fields);
   ALLOW_ACCESSORS(harmony_dynamic_import);
   ALLOW_ACCESSORS(harmony_import_meta);
-  ALLOW_ACCESSORS(harmony_optional_catch_binding);
   ALLOW_ACCESSORS(eval_cache);
 
 #undef ALLOW_ACCESSORS
@@ -407,6 +405,7 @@ class ParserBase {
 
     void AddSuspend() { suspend_count_++; }
     int suspend_count() const { return suspend_count_; }
+    bool CanSuspend() const { return suspend_count_ > 0; }
 
     FunctionKind kind() const { return scope()->function_kind(); }
 
@@ -1561,7 +1560,6 @@ class ParserBase {
   bool allow_harmony_static_fields_;
   bool allow_harmony_dynamic_import_;
   bool allow_harmony_import_meta_;
-  bool allow_harmony_optional_catch_binding_;
   bool allow_harmony_private_fields_;
   bool allow_eval_cache_;
 
@@ -5612,12 +5610,7 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseTryStatement(
     SourceRangeScope catch_range_scope(scanner(), &catch_range);
     if (Check(Token::CATCH)) {
       bool has_binding;
-      if (allow_harmony_optional_catch_binding()) {
-        has_binding = Check(Token::LPAREN);
-      } else {
-        has_binding = true;
-        Expect(Token::LPAREN, CHECK_OK);
-      }
+      has_binding = Check(Token::LPAREN);
 
       if (has_binding) {
         catch_info.scope = NewScope(CATCH_SCOPE);

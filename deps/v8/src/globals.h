@@ -405,8 +405,26 @@ inline std::ostream& operator<<(std::ostream& os,
   UNREACHABLE();
 }
 
+static_assert(kSmiValueSize <= 32, "Unsupported Smi tagging scheme");
+// Smi sign bit position must be 32-bit aligned so we can use sign extension
+// instructions on 64-bit architectures without additional shifts.
+static_assert((kSmiValueSize + kSmiShiftSize + kSmiTagSize) % 32 == 0,
+              "Unsupported Smi tagging scheme");
+
+constexpr bool kIsSmiValueInUpper32Bits =
+    (kSmiValueSize + kSmiShiftSize + kSmiTagSize) == 64;
+constexpr bool kIsSmiValueInLower32Bits =
+    (kSmiValueSize + kSmiShiftSize + kSmiTagSize) == 32;
+static_assert(!SmiValuesAre32Bits() == SmiValuesAre31Bits(),
+              "Unsupported Smi tagging scheme");
+static_assert(SmiValuesAre32Bits() == kIsSmiValueInUpper32Bits,
+              "Unsupported Smi tagging scheme");
+static_assert(SmiValuesAre31Bits() == kIsSmiValueInLower32Bits,
+              "Unsupported Smi tagging scheme");
+
 // Mask for the sign bit in a smi.
-constexpr intptr_t kSmiSignMask = kIntptrSignBit;
+constexpr intptr_t kSmiSignMask = static_cast<intptr_t>(
+    uintptr_t{1} << (kSmiValueSize + kSmiShiftSize + kSmiTagSize - 1));
 
 constexpr int kObjectAlignmentBits = kPointerSizeLog2;
 constexpr intptr_t kObjectAlignment = 1 << kObjectAlignmentBits;
@@ -1544,6 +1562,7 @@ enum class PoisoningMitigationLevel {
   kDontPoison,
   kPoisonCriticalOnly
 };
+
 enum class LoadSensitivity {
   kCritical,  // Critical loads are poisoned whenever we can run untrusted
               // code (i.e., when --untrusted-code-mitigations is on).
@@ -1551,6 +1570,17 @@ enum class LoadSensitivity {
               // (--branch-load-poisoning).
   kSafe       // Safe loads are never poisoned.
 };
+
+// The reason for a WebAssembly trap.
+#define FOREACH_WASM_TRAPREASON(V) \
+  V(TrapUnreachable)               \
+  V(TrapMemOutOfBounds)            \
+  V(TrapDivByZero)                 \
+  V(TrapDivUnrepresentable)        \
+  V(TrapRemByZero)                 \
+  V(TrapFloatUnrepresentable)      \
+  V(TrapFuncInvalid)               \
+  V(TrapFuncSigMismatch)
 
 }  // namespace internal
 }  // namespace v8

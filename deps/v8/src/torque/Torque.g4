@@ -29,7 +29,6 @@ BREAK: 'break';
 GOTO: 'goto';
 OTHERWISE: 'otherwise';
 TRY: 'try';
-CATCH: 'catch';
 LABEL: 'label';
 LABELS: 'labels';
 TAIL: 'tail';
@@ -117,6 +116,7 @@ DECIMAL_LITERAL
         : MINUS? DECIMAL_INTEGER_LITERAL '.' DECIMAL_DIGIT* EXPONENT_PART?
         | MINUS? '.' DECIMAL_DIGIT+ EXPONENT_PART?
         | MINUS? DECIMAL_INTEGER_LITERAL EXPONENT_PART?
+        | MINUS? '0x' [0-9a-fA-F]+
         ;
 
 type : CONSTEXPR? IDENTIFIER
@@ -244,8 +244,8 @@ returnStatement: RETURN expression?;
 breakStatement: BREAK;
 continueStatement: CONTINUE;
 gotoStatement: GOTO labelReference argumentList?;
-handlerWithStatement: (CATCH IDENTIFIER | LABEL labelDeclaration) statementBlock;
-tryCatch: TRY statementBlock handlerWithStatement+;
+handlerWithStatement: LABEL labelDeclaration statementBlock;
+tryLabelStatement: TRY statementBlock handlerWithStatement+;
 
 diagnosticStatement: ((ASSERT_TOKEN | CHECK_TOKEN) '(' expression ')') | UNREACHABLE_TOKEN | DEBUG_TOKEN;
 
@@ -261,7 +261,7 @@ statement : variableDeclarationWithInitialization ';'
           | whileLoop
           | forOfLoop
           | forLoop
-          | tryCatch
+          | tryLabelStatement
           ;
 
 statementList : statement*;

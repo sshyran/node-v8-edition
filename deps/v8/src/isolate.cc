@@ -44,7 +44,6 @@
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/module-inl.h"
 #include "src/objects/promise-inl.h"
-#include "src/profiler/cpu-profiler.h"
 #include "src/profiler/tracing-cpu-profiler.h"
 #include "src/prototype.h"
 #include "src/regexp/regexp-stack.h"
@@ -769,11 +768,7 @@ class CaptureStackTraceHelper {
       if (entry != NumberDictionary::kNotFound) {
         Handle<StackFrameInfo> frame(
             StackFrameInfo::cast(cache->ValueAt(entry)));
-        DCHECK(frame->function_name()->IsString());
-        Handle<String> function_name = summ.FunctionName();
-        if (function_name->Equals(String::cast(frame->function_name()))) {
-          return frame;
-        }
+        return frame;
       }
     }
 
@@ -2508,6 +2503,7 @@ Isolate::Isolate()
       global_handles_(nullptr),
       eternal_handles_(nullptr),
       thread_manager_(nullptr),
+      builtins_(this),
       setup_delegate_(nullptr),
       regexp_stack_(nullptr),
       date_cache_(nullptr),
@@ -2517,7 +2513,8 @@ Isolate::Isolate()
       random_number_generator_(nullptr),
       fuzzer_rng_(nullptr),
       rail_mode_(PERFORMANCE_ANIMATION),
-      promise_hook_or_debug_is_active_(false),
+      atomics_wait_callback_(nullptr),
+      atomics_wait_callback_data_(nullptr),
       promise_hook_(nullptr),
       load_start_time_ms_(0),
       serializer_enabled_(false),
@@ -2526,7 +2523,6 @@ Isolate::Isolate()
       is_tail_call_elimination_enabled_(true),
       is_isolate_in_background_(false),
       memory_savings_mode_active_(false),
-      cpu_profiler_(nullptr),
       heap_profiler_(nullptr),
       code_event_dispatcher_(new CodeEventDispatcher()),
       function_entry_hook_(nullptr),
@@ -2647,10 +2643,6 @@ void Isolate::Deinit() {
     PrintF(stdout, "=== Stress deopt counter: %u\n", stress_deopt_count_);
   }
 
-  if (cpu_profiler_) {
-    cpu_profiler_->DeleteAllProfiles();
-  }
-
   // We must stop the logger before we tear down other components.
   sampler::Sampler* sampler = logger_->sampler();
   if (sampler && sampler->IsActive()) sampler->Stop();
@@ -2701,9 +2693,6 @@ void Isolate::Deinit() {
 
   delete ast_string_constants_;
   ast_string_constants_ = nullptr;
-
-  delete cpu_profiler_;
-  cpu_profiler_ = nullptr;
 
   code_event_dispatcher_.reset();
 
@@ -3124,6 +3113,8 @@ bool Isolate::Init(StartupDeserializer* des) {
       static_cast<int>(OFFSET_OF(Isolate, heap_.external_reference_table_)),
       Internals::kIsolateRootsOffset +
           Heap::kRootsExternalReferenceTableOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, heap_.builtins_)),
+           Internals::kIsolateRootsOffset + Heap::kRootsBuiltinsOffset);
 
   {
     HandleScope scope(this);
@@ -3479,7 +3470,7 @@ bool Isolate::IsPromiseHookProtectorIntact() {
   bool is_promise_hook_protector_intact =
       Smi::ToInt(promise_hook_cell->value()) == kProtectorValid;
   DCHECK_IMPLIES(is_promise_hook_protector_intact,
-                 !promise_hook_or_debug_is_active_);
+                 !promise_hook_or_async_event_delegate_);
   return is_promise_hook_protector_intact;
 }
 
@@ -3770,12 +3761,13 @@ void Isolate::FireCallCompletedCallback() {
   }
 }
 
-void Isolate::DebugStateUpdated() {
-  bool promise_hook_or_debug_is_active = promise_hook_ || debug()->is_active();
-  if (promise_hook_or_debug_is_active && IsPromiseHookProtectorIntact()) {
+void Isolate::PromiseHookStateUpdated() {
+  bool is_active = promise_hook_ || async_event_delegate_;
+  if (is_active && IsPromiseHookProtectorIntact()) {
+    HandleScope scope(this);
     InvalidatePromiseHookProtector();
   }
-  promise_hook_or_debug_is_active_ = promise_hook_or_debug_is_active;
+  promise_hook_or_async_event_delegate_ = is_active;
 }
 
 namespace {
@@ -3854,17 +3846,102 @@ void Isolate::SetHostInitializeImportMetaObjectCallback(
   host_initialize_import_meta_object_callback_ = callback;
 }
 
+void Isolate::SetAtomicsWaitCallback(v8::Isolate::AtomicsWaitCallback callback,
+                                     void* data) {
+  atomics_wait_callback_ = callback;
+  atomics_wait_callback_data_ = data;
+}
+
+void Isolate::RunAtomicsWaitCallback(v8::Isolate::AtomicsWaitEvent event,
+                                     Handle<JSArrayBuffer> array_buffer,
+                                     size_t offset_in_bytes, int32_t value,
+                                     double timeout_in_ms,
+                                     AtomicsWaitWakeHandle* stop_handle) {
+  DCHECK(array_buffer->is_shared());
+  if (atomics_wait_callback_ == nullptr) return;
+  HandleScope handle_scope(this);
+  atomics_wait_callback_(
+      event, v8::Utils::ToLocalShared(array_buffer), offset_in_bytes, value,
+      timeout_in_ms,
+      reinterpret_cast<v8::Isolate::AtomicsWaitWakeHandle*>(stop_handle),
+      atomics_wait_callback_data_);
+}
+
 void Isolate::SetPromiseHook(PromiseHook hook) {
   promise_hook_ = hook;
-  DebugStateUpdated();
+  PromiseHookStateUpdated();
 }
 
 void Isolate::RunPromiseHook(PromiseHookType type, Handle<JSPromise> promise,
                              Handle<Object> parent) {
-  if (debug()->is_active()) debug()->RunPromiseHook(type, promise, parent);
+  RunPromiseHookForAsyncEventDelegate(type, promise);
   if (promise_hook_ == nullptr) return;
   promise_hook_(type, v8::Utils::PromiseToLocal(promise),
                 v8::Utils::ToLocal(parent));
+}
+
+void Isolate::RunPromiseHookForAsyncEventDelegate(PromiseHookType type,
+                                                  Handle<JSPromise> promise) {
+  if (!async_event_delegate_) return;
+  if (type == PromiseHookType::kResolve) return;
+
+  if (type == PromiseHookType::kBefore) {
+    if (!promise->async_task_id()) return;
+    async_event_delegate_->AsyncEventOccurred(debug::kDebugWillHandle,
+                                              promise->async_task_id(), false);
+  } else if (type == PromiseHookType::kAfter) {
+    if (!promise->async_task_id()) return;
+    async_event_delegate_->AsyncEventOccurred(debug::kDebugDidHandle,
+                                              promise->async_task_id(), false);
+  } else {
+    DCHECK(type == PromiseHookType::kInit);
+    debug::DebugAsyncActionType type = debug::kDebugPromiseThen;
+    bool last_frame_was_promise_builtin = false;
+    JavaScriptFrameIterator it(this);
+    while (!it.done()) {
+      std::vector<Handle<SharedFunctionInfo>> infos;
+      it.frame()->GetFunctions(&infos);
+      for (size_t i = 1; i <= infos.size(); ++i) {
+        Handle<SharedFunctionInfo> info = infos[infos.size() - i];
+        if (info->IsUserJavaScript()) {
+          // We should not report PromiseThen and PromiseCatch which is called
+          // indirectly, e.g. Promise.all calls Promise.then internally.
+          if (last_frame_was_promise_builtin) {
+            if (!promise->async_task_id()) {
+              promise->set_async_task_id(++async_task_count_);
+            }
+            async_event_delegate_->AsyncEventOccurred(
+                type, promise->async_task_id(), debug()->IsBlackboxed(info));
+          }
+          return;
+        }
+        last_frame_was_promise_builtin = false;
+        if (info->HasBuiltinId()) {
+          if (info->builtin_id() == Builtins::kPromisePrototypeThen) {
+            type = debug::kDebugPromiseThen;
+            last_frame_was_promise_builtin = true;
+          } else if (info->builtin_id() == Builtins::kPromisePrototypeCatch) {
+            type = debug::kDebugPromiseCatch;
+            last_frame_was_promise_builtin = true;
+          } else if (info->builtin_id() == Builtins::kPromisePrototypeFinally) {
+            type = debug::kDebugPromiseFinally;
+            last_frame_was_promise_builtin = true;
+          }
+        }
+      }
+      it.Advance();
+    }
+  }
+}
+
+void Isolate::OnAsyncFunctionStateChanged(Handle<JSPromise> promise,
+                                          debug::DebugAsyncActionType event) {
+  if (!async_event_delegate_) return;
+  if (!promise->async_task_id()) {
+    promise->set_async_task_id(++async_task_count_);
+  }
+  async_event_delegate_->AsyncEventOccurred(event, promise->async_task_id(),
+                                            false);
 }
 
 void Isolate::SetPromiseRejectCallback(PromiseRejectCallback callback) {
@@ -4067,13 +4144,6 @@ void Isolate::SetIdle(bool is_idle) {
   } else if (state == IDLE) {
     set_current_vm_state(EXTERNAL);
   }
-}
-
-CpuProfiler* Isolate::EnsureCpuProfiler() {
-  if (!cpu_profiler_) {
-    cpu_profiler_ = new CpuProfiler(this);
-  }
-  return cpu_profiler_;
 }
 
 bool StackLimitCheck::JsHasOverflowed(uintptr_t gap) const {

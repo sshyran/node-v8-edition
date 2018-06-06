@@ -1589,14 +1589,14 @@ void MacroAssembler::LoadObject(Register result, Handle<Object> object) {
 
 void TurboAssembler::Move(Register dst, Register src) { Mov(dst, src); }
 
-void TurboAssembler::Move(Register dst, Handle<HeapObject> x) {
+void TurboAssembler::Move(Register dst, Handle<HeapObject> value) {
 #ifdef V8_EMBEDDED_BUILTINS
   if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList()) {
-    LookupConstant(dst, x);
+    LookupConstant(dst, value);
     return;
   }
 #endif  // V8_EMBEDDED_BUILTINS
-  Mov(dst, x);
+  Mov(dst, value);
 }
 
 void TurboAssembler::Move(Register dst, Smi* src) { Mov(dst, src); }
@@ -1886,19 +1886,37 @@ void TurboAssembler::CallCFunction(Register function, int num_of_reg_args,
 
 #ifdef V8_EMBEDDED_BUILTINS
 void TurboAssembler::LookupConstant(Register destination,
-                                    Handle<Object> object) {
+                                    Handle<HeapObject> object) {
   CHECK(isolate()->ShouldLoadConstantsFromRootList());
   CHECK(root_array_available_);
+
+  // Before falling back to the (fairly slow) lookup from the constants table,
+  // check if any of the fast paths can be applied.
+  {
+    int builtin_index;
+    Heap::RootListIndex root_index;
+    if (isolate()->heap()->IsRootHandle(object, &root_index)) {
+      // Roots are loaded relative to the root register.
+      LoadRoot(destination, root_index);
+      return;
+    } else if (isolate()->builtins()->IsBuiltinHandle(object, &builtin_index)) {
+      // Similar to roots, builtins may be loaded from the builtins table.
+      LoadBuiltin(destination, builtin_index);
+      return;
+    } else if (object.is_identical_to(code_object_) &&
+               Builtins::IsBuiltinId(maybe_builtin_index_)) {
+      // The self-reference loaded through Codevalue() may also be a builtin
+      // and thus viable for a fast load.
+      LoadBuiltin(destination, maybe_builtin_index_);
+      return;
+    }
+  }
 
   // Ensure the given object is in the builtins constants table and fetch its
   // index.
   BuiltinsConstantsTableBuilder* builder =
       isolate()->builtins_constants_table_builder();
   uint32_t index = builder->AddObject(object);
-
-  // TODO(jgruber): Load builtins from the builtins table.
-  // TODO(jgruber): Ensure that code generation can recognize constant targets
-  // in kArchCallCodeObject.
 
   DCHECK(isolate()->heap()->RootCanBeTreatedAsConstant(
       Heap::kBuiltinsConstantsTableRootIndex));
@@ -1930,6 +1948,15 @@ void TurboAssembler::LookupExternalReference(Register destination,
 
   Ldr(destination,
       MemOperand(kRootRegister, roots_to_external_reference_offset));
+}
+
+void TurboAssembler::LoadBuiltin(Register destination, int builtin_index) {
+  DCHECK(Builtins::IsBuiltinId(builtin_index));
+
+  int32_t roots_to_builtins_offset =
+      Heap::roots_to_builtins_offset() + builtin_index * kPointerSize;
+
+  Ldr(destination, MemOperand(kRootRegister, roots_to_builtins_offset));
 }
 #endif  // V8_EMBEDDED_BUILTINS
 
@@ -1970,7 +1997,7 @@ static int64_t CalculateTargetOffset(Address target, RelocInfo::Mode rmode,
   int64_t offset = static_cast<int64_t>(target);
   // The target of WebAssembly calls is still an index instead of an actual
   // address at this point, and needs to be encoded as-is.
-  if (rmode != RelocInfo::WASM_CALL) {
+  if (rmode != RelocInfo::WASM_CALL && rmode != RelocInfo::WASM_STUB_CALL) {
     offset -= reinterpret_cast<int64_t>(pc);
     DCHECK_EQ(offset % kInstructionSize, 0);
     offset = offset / static_cast<int>(kInstructionSize);
@@ -2414,9 +2441,9 @@ void MacroAssembler::InvokeFunction(Register function, Register new_target,
   // extension to correctly handle it.
   Ldr(expected_reg, FieldMemOperand(function,
                                     JSFunction::kSharedFunctionInfoOffset));
-  Ldrsw(expected_reg,
-        FieldMemOperand(expected_reg,
-                        SharedFunctionInfo::kFormalParameterCountOffset));
+  Ldrh(expected_reg,
+       FieldMemOperand(expected_reg,
+                       SharedFunctionInfo::kFormalParameterCountOffset));
 
   ParameterCount expected(expected_reg);
   InvokeFunctionCode(function, new_target, expected, actual, flag);

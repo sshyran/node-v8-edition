@@ -517,8 +517,8 @@ BUILTIN(LocaleConstructor) {
   } else {  // [[Construct]]
     Handle<JSFunction> target = args.target();
     Handle<JSReceiver> new_target = Handle<JSReceiver>::cast(args.new_target());
-    Handle<JSObject> result;
 
+    Handle<JSObject> result;
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, result,
                                        JSObject::New(target, new_target));
 
@@ -534,7 +534,8 @@ BUILTIN(LocaleConstructor) {
     Handle<String> locale_string;
     if (tag->IsJSLocale() &&
         Handle<JSLocale>::cast(tag)->locale()->IsString()) {
-      locale_string = Handle<String>(Handle<JSLocale>::cast(tag)->locale());
+      locale_string =
+          Handle<String>(Handle<JSLocale>::cast(tag)->locale(), isolate);
     } else {
       ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, locale_string,
                                          Object::ToString(isolate, tag));
@@ -549,13 +550,10 @@ BUILTIN(LocaleConstructor) {
                                          Object::ToObject(isolate, options));
     }
 
-    if (!JSLocale::InitializeLocale(isolate, Handle<JSLocale>::cast(result),
-                                    locale_string, options_object)) {
-      THROW_NEW_ERROR_RETURN_FAILURE(
-          isolate, NewTypeError(MessageTemplate::kLocaleBadParameters));
-    }
-
-    return *result;
+    RETURN_RESULT_OR_FAILURE(
+        isolate,
+        JSLocale::InitializeLocale(isolate, Handle<JSLocale>::cast(result),
+                                   locale_string, options_object));
   }
 }
 

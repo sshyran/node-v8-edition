@@ -67,9 +67,6 @@ class TypedArrayBuiltinsAssembler : public CodeStubAssembler {
   // Returns true if kind is either BIGINT64_ELEMENTS or BIGUINT64_ELEMENTS.
   TNode<Word32T> IsBigInt64ElementsKind(TNode<Word32T> kind);
 
-  // Loads the element kind of TypedArray instance.
-  TNode<Word32T> LoadElementsKind(TNode<JSTypedArray> typed_array);
-
   // Returns the byte size of an element for a TypedArray elements kind.
   TNode<IntPtrT> GetTypedArrayElementSize(TNode<Word32T> elements_kind);
 
@@ -133,16 +130,6 @@ class TypedArrayBuiltinsAssembler : public CodeStubAssembler {
 
   void DispatchTypedArrayByElementsKind(
       TNode<Word32T> elements_kind, const TypedArraySwitchCase& case_function);
-
-  // Returns true iff number is NaN.
-  // TOOD(szuend): Remove when UncheckedCasts are supported in Torque.
-  TNode<BoolT> NumberIsNaN(TNode<Number> number);
-
-  // TODO(szuend): Remove when UncheckedCasts are supported in Torque.
-  TNode<FixedTypedArrayBase> UncheckedCastFixedArrayBaseToFixedTypedArrayBase(
-      TNode<FixedArrayBase> array) {
-    return CAST(array);
-  }
 };
 
 }  // namespace internal

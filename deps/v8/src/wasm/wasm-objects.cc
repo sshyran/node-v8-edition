@@ -7,6 +7,7 @@
 
 #include "src/assembler-inl.h"
 #include "src/base/iterator.h"
+#include "src/code-factory.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/debug/debug-interface.h"
 #include "src/objects-inl.h"
@@ -273,8 +274,6 @@ Handle<WasmModuleObject> WasmModuleObject::New(
     shared->script()->set_wasm_module_object(*module_object);
   }
   module_object->set_shared(*shared);
-
-  compiled_module->LogWasmCodes(isolate);
   return module_object;
 }
 
@@ -782,20 +781,26 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
       module_object->shared()->module()->num_imported_functions;
   auto num_imported_mutable_globals =
       module_object->shared()->module()->num_imported_mutable_globals;
+  size_t native_allocations_size = 0;  // TODO(titzer): estimate properly.
   auto native_allocations = Managed<WasmInstanceNativeAllocations>::Allocate(
-      isolate, instance, num_imported_functions, num_imported_mutable_globals);
+      isolate, native_allocations_size, instance, num_imported_functions,
+      num_imported_mutable_globals);
   instance->set_managed_native_allocations(*native_allocations);
 
   Handle<FixedArray> imported_function_instances =
       isolate->factory()->NewFixedArray(num_imported_functions);
-
   instance->set_imported_function_instances(*imported_function_instances);
+
   Handle<FixedArray> imported_function_callables =
       isolate->factory()->NewFixedArray(num_imported_functions);
-
   instance->set_imported_function_callables(*imported_function_callables);
 
+  Handle<Code> centry_stub = CodeFactory::CEntry(isolate);
+  instance->set_centry_stub(*centry_stub);
+
   instance->SetRawMemory(nullptr, 0);
+  instance->set_stack_limit_address(
+      isolate->stack_guard()->address_of_jslimit());
   instance->set_globals_start(nullptr);
   instance->set_indirect_function_table_size(0);
   instance->set_indirect_function_table_sig_ids(nullptr);
@@ -1357,11 +1362,14 @@ Handle<WasmCompiledModule> WasmCompiledModule::New(Isolate* isolate,
   {
     auto native_module =
         isolate->wasm_engine()->code_manager()->NewNativeModule(*module, env);
+    size_t native_module_size =
+        0;  // TODO(titzer): estimate native module size.
     Handle<Foreign> native_module_wrapper =
-        Managed<wasm::NativeModule>::FromUniquePtr(isolate,
+        Managed<wasm::NativeModule>::FromUniquePtr(isolate, native_module_size,
                                                    std::move(native_module));
     compiled_module->set_native_module(*native_module_wrapper);
   }
+  compiled_module->GetNativeModule()->SetRuntimeStubs(isolate);
 
   // TODO(mtrofin): copy the rest of the specialization parameters over.
   // We're currently OK because we're only using defaults.
@@ -1378,9 +1386,10 @@ Handle<WasmCompiledModule> WasmCompiledModule::Clone(
 
   // construct the wrapper in 2 steps, because its construction may trigger GC,
   // which would shift the this pointer in set_native_module.
+  size_t native_module_size = 0;
   Handle<Foreign> native_module_wrapper =
       Managed<wasm::NativeModule>::FromSharedPtr(
-          isolate,
+          isolate, native_module_size,
           Managed<wasm::NativeModule>::cast(module->native_module())->get());
   ret->set_native_module(*native_module_wrapper);
 
@@ -1554,10 +1563,10 @@ void WasmCompiledModule::LogWasmCodes(Isolate* isolate) {
   if (native_module == nullptr) return;
   // TODO(titzer): we skip the logging of the import wrappers
   // here, but they should be included somehow.
-  const uint32_t start =
+  const uint32_t num_imported_functions =
       native_module->shared_module_data()->module()->num_imported_functions;
-  const uint32_t number_of_codes = native_module->function_count();
-  for (uint32_t i = start; i < number_of_codes; i++) {
+  const uint32_t num_functions = native_module->num_functions();
+  for (uint32_t i = num_imported_functions; i < num_functions; i++) {
     wasm::WasmCode* code = native_module->code(i);
     if (code == nullptr) continue;
     code->LogCode(isolate);

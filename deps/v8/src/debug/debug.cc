@@ -345,12 +345,12 @@ void Debug::ThreadInit() {
   thread_local_.ignore_step_into_function_ = Smi::kZero;
   thread_local_.target_frame_count_ = -1;
   thread_local_.return_value_ = Smi::kZero;
-  thread_local_.async_task_count_ = 0;
   thread_local_.last_breakpoint_id_ = 0;
   clear_suspended_generator();
   thread_local_.restart_fp_ = kNullAddress;
   base::Relaxed_Store(&thread_local_.current_debug_scope_,
                       static_cast<base::AtomicWord>(0));
+  thread_local_.break_on_next_function_call_ = false;
   UpdateHookOnFunctionCall();
 }
 
@@ -474,11 +474,13 @@ void Debug::Break(JavaScriptFrame* frame, Handle<JSFunction> break_target) {
   // Find actual break points, if any, and trigger debug break event.
   MaybeHandle<FixedArray> break_points_hit =
       CheckBreakPoints(debug_info, &location);
-  if (!break_points_hit.is_null()) {
+  if (!break_points_hit.is_null() || break_on_next_function_call()) {
     // Clear all current stepping setup.
     ClearStepping();
     // Notify the debug event listeners.
-    OnDebugBreak(break_points_hit.ToHandleChecked());
+    OnDebugBreak(!break_points_hit.is_null()
+                     ? break_points_hit.ToHandleChecked()
+                     : isolate_->factory()->empty_fixed_array());
     return;
   }
 
@@ -898,8 +900,24 @@ MaybeHandle<FixedArray> Debug::GetHitBreakPoints(Handle<DebugInfo> debug_info,
   return break_points_hit;
 }
 
+void Debug::SetBreakOnNextFunctionCall() {
+  // This method forces V8 to break on next function call regardless current
+  // last_step_action_. If any break happens between SetBreakOnNextFunctionCall
+  // and ClearBreakOnNextFunctionCall, we will clear this flag and stepping. If
+  // break does not happen, e.g. all called functions are blackboxed or no
+  // function is called, then we will clear this flag and let stepping continue
+  // its normal business.
+  thread_local_.break_on_next_function_call_ = true;
+  UpdateHookOnFunctionCall();
+}
+
+void Debug::ClearBreakOnNextFunctionCall() {
+  thread_local_.break_on_next_function_call_ = false;
+  UpdateHookOnFunctionCall();
+}
+
 void Debug::PrepareStepIn(Handle<JSFunction> function) {
-  CHECK(last_step_action() >= StepIn);
+  CHECK(last_step_action() >= StepIn || break_on_next_function_call());
   if (ignore_events()) return;
   if (in_debug_scope()) return;
   if (break_disabled()) return;
@@ -1159,6 +1177,7 @@ void Debug::ClearStepping() {
   thread_local_.fast_forward_to_return_ = false;
   thread_local_.last_frame_count_ = -1;
   thread_local_.target_frame_count_ = -1;
+  thread_local_.break_on_next_function_call_ = false;
   UpdateHookOnFunctionCall();
 }
 
@@ -1684,44 +1703,6 @@ Handle<FixedArray> Debug::GetLoadedScripts() {
   return FixedArray::ShrinkOrEmpty(results, length);
 }
 
-
-MaybeHandle<Object> Debug::MakeExecutionState() {
-  // Create the execution state object.
-  Handle<Object> argv[] = { isolate_->factory()->NewNumberFromInt(break_id()) };
-  return CallFunction("MakeExecutionState", arraysize(argv), argv);
-}
-
-
-MaybeHandle<Object> Debug::MakeExceptionEvent(Handle<Object> exception,
-                                              bool uncaught,
-                                              Handle<Object> promise) {
-  // Create the new exception event object.
-  Handle<Object> argv[] = { isolate_->factory()->NewNumberFromInt(break_id()),
-                            exception,
-                            isolate_->factory()->ToBoolean(uncaught),
-                            promise };
-  return CallFunction("MakeExceptionEvent", arraysize(argv), argv);
-}
-
-
-MaybeHandle<Object> Debug::MakeCompileEvent(Handle<Script> script,
-                                            v8::DebugEvent type) {
-  // Create the compile event object.
-  Handle<Object> script_wrapper = Script::GetWrapper(script);
-  Handle<Object> argv[] = { script_wrapper,
-                            isolate_->factory()->NewNumberFromInt(type) };
-  return CallFunction("MakeCompileEvent", arraysize(argv), argv);
-}
-
-MaybeHandle<Object> Debug::MakeAsyncTaskEvent(
-    v8::debug::PromiseDebugActionType type, int id) {
-  // Create the async task event object.
-  Handle<Object> argv[] = {Handle<Smi>(Smi::FromInt(type), isolate_),
-                           Handle<Smi>(Smi::FromInt(id), isolate_)};
-  return CallFunction("MakeAsyncTaskEvent", arraysize(argv), argv);
-}
-
-
 void Debug::OnThrow(Handle<Object> exception) {
   if (in_debug_scope() || ignore_events()) return;
   // Temporarily clear any scheduled_exception to allow evaluating
@@ -1753,7 +1734,7 @@ void Debug::OnPromiseReject(Handle<Object> promise, Handle<Object> value) {
 
 namespace {
 v8::Local<v8::Context> GetDebugEventContext(Isolate* isolate) {
-  Handle<Context> context = isolate->debug()->debugger_entry()->GetContext();
+  Handle<Context> context = handle(isolate->context());
   // Isolate::context() may have been nullptr when "script collected" event
   // occurred.
   if (context.is_null()) return v8::Local<v8::Context>();
@@ -1784,9 +1765,7 @@ bool Debug::IsFrameBlackboxed(JavaScriptFrame* frame) {
 }
 
 void Debug::OnException(Handle<Object> exception, Handle<Object> promise) {
-  // We cannot generate debug events when JS execution is disallowed.
-  // TODO(5530): Reenable debug events within DisallowJSScopes once relevant
-  // code (MakeExceptionEvent and ProcessDebugEvent) have been moved to C++.
+  // TODO(kozyatinskiy): regress-662674.js test fails on arm without this.
   if (!AllowJavascriptExecution::IsAllowed(isolate_)) return;
 
   Isolate::CatchType catch_type = isolate_->PredictExceptionCatcher();
@@ -1831,14 +1810,8 @@ void Debug::OnException(Handle<Object> exception, Handle<Object> promise) {
   PostponeInterruptsScope postpone(isolate_);
   DisableBreak no_recursive_break(this);
 
-  // Create the execution state.
-  Handle<Object> exec_state;
-  // Bail out and don't call debugger if exception.
-  if (!MakeExecutionState().ToHandle(&exec_state)) return;
-
   debug_delegate_->ExceptionThrown(
       GetDebugEventContext(isolate_),
-      v8::Utils::ToLocal(Handle<JSObject>::cast(exec_state)),
       v8::Utils::ToLocal(exception), v8::Utils::ToLocal(promise), uncaught);
 }
 
@@ -1858,11 +1831,6 @@ void Debug::OnDebugBreak(Handle<FixedArray> break_points_hit) {
   PostponeInterruptsScope no_interrupts(isolate_);
   DisableBreak no_recursive_break(this);
 
-  // Create the execution state.
-  Handle<Object> exec_state;
-  // Bail out and don't call debugger if exception.
-  if (!MakeExecutionState().ToHandle(&exec_state)) return;
-
   std::vector<int> inspector_break_points_hit;
   int inspector_break_points_count = 0;
   // This array contains breakpoints installed using JS debug API.
@@ -1874,120 +1842,7 @@ void Debug::OnDebugBreak(Handle<FixedArray> break_points_hit) {
 
   debug_delegate_->BreakProgramRequested(
       GetDebugEventContext(isolate_),
-      v8::Utils::ToLocal(Handle<JSObject>::cast(exec_state)),
       inspector_break_points_hit);
-}
-
-
-void Debug::OnCompileError(Handle<Script> script) {
-  ProcessCompileEvent(v8::CompileError, script);
-}
-
-
-// Handle debugger actions when a new script is compiled.
-void Debug::OnAfterCompile(Handle<Script> script) {
-  ProcessCompileEvent(v8::AfterCompile, script);
-}
-
-namespace {
-// In an async function, reuse the existing stack related to the outer
-// Promise. Otherwise, e.g. in a direct call to then, save a new stack.
-// Promises with multiple reactions with one or more of them being async
-// functions will not get a good stack trace, as async functions require
-// different stacks from direct Promise use, but we save and restore a
-// stack once for all reactions.
-//
-// If this isn't a case of async function, we return false, otherwise
-// we set the correct id and return true.
-//
-// TODO(littledan): Improve this case.
-int GetReferenceAsyncTaskId(Isolate* isolate, Handle<JSPromise> promise) {
-  Handle<Symbol> handled_by_symbol =
-      isolate->factory()->promise_handled_by_symbol();
-  Handle<Object> handled_by_promise =
-      JSObject::GetDataProperty(promise, handled_by_symbol);
-  if (!handled_by_promise->IsJSPromise()) {
-    return isolate->debug()->NextAsyncTaskId(promise);
-  }
-  Handle<JSPromise> handled_by_promise_js =
-      Handle<JSPromise>::cast(handled_by_promise);
-  Handle<Symbol> async_stack_id_symbol =
-      isolate->factory()->promise_async_stack_id_symbol();
-  Handle<Object> async_task_id =
-      JSObject::GetDataProperty(handled_by_promise_js, async_stack_id_symbol);
-  if (!async_task_id->IsSmi()) {
-    return isolate->debug()->NextAsyncTaskId(promise);
-  }
-  return Handle<Smi>::cast(async_task_id)->value();
-}
-}  //  namespace
-
-void Debug::RunPromiseHook(PromiseHookType hook_type, Handle<JSPromise> promise,
-                           Handle<Object> parent) {
-  if (hook_type == PromiseHookType::kResolve) return;
-  if (in_debug_scope() || ignore_events()) return;
-  if (!debug_delegate_) return;
-  PostponeInterruptsScope no_interrupts(isolate_);
-
-  int id = GetReferenceAsyncTaskId(isolate_, promise);
-  if (hook_type == PromiseHookType::kBefore) {
-    debug_delegate_->PromiseEventOccurred(debug::kDebugWillHandle, id, false);
-  } else if (hook_type == PromiseHookType::kAfter) {
-    debug_delegate_->PromiseEventOccurred(debug::kDebugDidHandle, id, false);
-  } else {
-    DCHECK(hook_type == PromiseHookType::kInit);
-    debug::PromiseDebugActionType type = debug::kDebugPromiseThen;
-    bool last_frame_was_promise_builtin = false;
-    JavaScriptFrameIterator it(isolate_);
-    while (!it.done()) {
-      std::vector<Handle<SharedFunctionInfo>> infos;
-      it.frame()->GetFunctions(&infos);
-      for (size_t i = 1; i <= infos.size(); ++i) {
-        Handle<SharedFunctionInfo> info = infos[infos.size() - i];
-        if (info->IsUserJavaScript()) {
-          // We should not report PromiseThen and PromiseCatch which is called
-          // indirectly, e.g. Promise.all calls Promise.then internally.
-          if (type == debug::kDebugAsyncFunctionPromiseCreated ||
-              last_frame_was_promise_builtin) {
-            debug_delegate_->PromiseEventOccurred(type, id, IsBlackboxed(info));
-          }
-          return;
-        }
-        last_frame_was_promise_builtin = false;
-        if (info->HasBuiltinId()) {
-          if (info->builtin_id() == Builtins::kAsyncFunctionPromiseCreate) {
-            type = debug::kDebugAsyncFunctionPromiseCreated;
-            last_frame_was_promise_builtin = true;
-          } else if (info->builtin_id() == Builtins::kPromisePrototypeThen) {
-            type = debug::kDebugPromiseThen;
-            last_frame_was_promise_builtin = true;
-          } else if (info->builtin_id() == Builtins::kPromisePrototypeCatch) {
-            type = debug::kDebugPromiseCatch;
-            last_frame_was_promise_builtin = true;
-          } else if (info->builtin_id() == Builtins::kPromisePrototypeFinally) {
-            type = debug::kDebugPromiseFinally;
-            last_frame_was_promise_builtin = true;
-          }
-        }
-      }
-      it.Advance();
-    }
-  }
-}
-
-int Debug::NextAsyncTaskId(Handle<JSObject> promise) {
-  LookupIterator it(promise, isolate_->factory()->promise_async_id_symbol());
-  Maybe<bool> maybe = JSReceiver::HasProperty(&it);
-  if (maybe.ToChecked()) {
-    MaybeHandle<Object> result = Object::GetProperty(&it);
-    return Handle<Smi>::cast(result.ToHandleChecked())->value();
-  }
-  Handle<Smi> async_id =
-      handle(Smi::FromInt(++thread_local_.async_task_count_), isolate_);
-  Object::SetProperty(&it, async_id, LanguageMode::kSloppy,
-                      Object::MAY_BE_STORE_FROM_KEYED)
-      .ToChecked();
-  return async_id->value();
 }
 
 namespace {
@@ -2048,7 +1903,11 @@ bool Debug::CanBreakAtEntry(Handle<SharedFunctionInfo> shared) {
 
 bool Debug::SetScriptSource(Handle<Script> script, Handle<String> source,
                             bool preview, bool* stack_changed) {
+  SaveContext save(isolate_);
   DebugScope debug_scope(this);
+  if (debug_scope.failed()) return false;
+  isolate_->set_context(*debug_context());
+
   set_live_edit_enabled(true);
   Handle<Object> script_wrapper = Script::GetWrapper(script);
   Handle<Object> argv[] = {script_wrapper, source,
@@ -2070,7 +1929,15 @@ bool Debug::SetScriptSource(Handle<Script> script, Handle<String> source,
   return true;
 }
 
-void Debug::ProcessCompileEvent(v8::DebugEvent event, Handle<Script> script) {
+void Debug::OnCompileError(Handle<Script> script) {
+  ProcessCompileEvent(true, script);
+}
+
+void Debug::OnAfterCompile(Handle<Script> script) {
+  ProcessCompileEvent(false, script);
+}
+
+void Debug::ProcessCompileEvent(bool has_compile_error, Handle<Script> script) {
   // Attach the correct debug id to the script. The debug id is used by the
   // inspector to filter scripts by native context.
   script->set_context_data(isolate_->native_context()->debug_context_id());
@@ -2087,8 +1954,7 @@ void Debug::ProcessCompileEvent(v8::DebugEvent event, Handle<Script> script) {
   DisableBreak no_recursive_break(this);
   AllowJavascriptExecution allow_script(isolate_);
   debug_delegate_->ScriptCompiled(ToApiHandle<debug::Script>(script),
-                                  live_edit_enabled(),
-                                  event != v8::AfterCompile);
+                                  live_edit_enabled(), has_compile_error);
 }
 
 
@@ -2150,34 +2016,17 @@ void Debug::UpdateState() {
     Unload();
   }
   is_active_ = is_active;
-  isolate_->DebugStateUpdated();
+  if (is_active && isolate_->IsPromiseHookProtectorIntact()) {
+    isolate_->InvalidatePromiseHookProtector();
+  }
 }
 
 void Debug::UpdateHookOnFunctionCall() {
   STATIC_ASSERT(LastStepAction == StepIn);
   hook_on_function_call_ =
       thread_local_.last_step_action_ == StepIn ||
-      isolate_->debug_execution_mode() == DebugInfo::kSideEffects;
-}
-
-MaybeHandle<Object> Debug::Call(Handle<Object> fun, Handle<Object> data) {
-  AllowJavascriptExecutionDebugOnly allow_script(isolate_);
-  DebugScope debug_scope(this);
-  if (debug_scope.failed()) return isolate_->factory()->undefined_value();
-
-  // Create the execution state.
-  Handle<Object> exec_state;
-  if (!MakeExecutionState().ToHandle(&exec_state)) {
-    return isolate_->factory()->undefined_value();
-  }
-
-  Handle<Object> argv[] = { exec_state, data };
-  return Execution::Call(
-      isolate_,
-      fun,
-      Handle<Object>(debug_context()->global_proxy(), isolate_),
-      arraysize(argv),
-      argv);
+      isolate_->debug_execution_mode() == DebugInfo::kSideEffects ||
+      thread_local_.break_on_next_function_call_;
 }
 
 void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode) {
@@ -2204,19 +2053,7 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode) {
       bool ignore_break = ignore_break_mode == kIgnoreIfTopFrameBlackboxed
                               ? IsBlackboxed(shared)
                               : AllFramesOnStackAreBlackboxed();
-      if (ignore_break) {
-        // Inspector uses pause on next statement for asynchronous breakpoints.
-        // When breakpoint is fired we try to break on first not blackboxed
-        // statement. To achieve this goal we need to deoptimize current
-        // function and don't clear requested DebugBreak even if it's blackboxed
-        // to be able to break on not blackboxed function call.
-        // TODO(yangguo): introduce break_on_function_entry since current
-        // implementation is slow.
-        if (isolate_->stack_guard()->CheckDebugBreak()) {
-          Deoptimizer::DeoptimizeFunction(*function);
-        }
-        return;
-      }
+      if (ignore_break) return;
       JSGlobalObject* global = function->context()->global_object();
       // Don't stop in debugger functions.
       if (IsDebugGlobal(global)) return;
@@ -2224,8 +2061,6 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode) {
       if (IsMutedAtCurrentLocation(it.frame())) return;
     }
   }
-
-  isolate_->stack_guard()->ClearDebugBreak();
 
   // Clear stepping to avoid duplicate breaks.
   ClearStepping();
@@ -2279,7 +2114,6 @@ void Debug::PrintBreakLocation() {
 DebugScope::DebugScope(Debug* debug)
     : debug_(debug),
       prev_(debug->debugger_entry()),
-      save_(debug_->isolate_),
       no_termination_exceptons_(debug_->isolate_,
                                 StackGuard::TERMINATE_EXECUTION) {
   // Link recursive debugger entry.
@@ -2302,7 +2136,6 @@ DebugScope::DebugScope(Debug* debug)
   // Make sure that debugger is loaded and enter the debugger context.
   // The previous context is kept in save_.
   failed_ = !debug_->is_loaded();
-  if (!failed_) isolate()->set_context(*debug->debug_context());
 }
 
 
@@ -2486,116 +2319,5 @@ bool Debug::PerformSideEffectCheckForObject(Handle<Object> object) {
   isolate_->TerminateExecution();
   return false;
 }
-
-void LegacyDebugDelegate::PromiseEventOccurred(
-    v8::debug::PromiseDebugActionType type, int id, bool is_blackboxed) {
-  DebugScope debug_scope(isolate_->debug());
-  if (debug_scope.failed()) return;
-  HandleScope scope(isolate_);
-  Handle<Object> event_data;
-  if (isolate_->debug()->MakeAsyncTaskEvent(type, id).ToHandle(&event_data)) {
-    ProcessDebugEvent(v8::AsyncTaskEvent, Handle<JSObject>::cast(event_data));
-  }
-}
-
-void LegacyDebugDelegate::ScriptCompiled(v8::Local<v8::debug::Script> script,
-                                         bool is_live_edited,
-                                         bool is_compile_error) {
-  Handle<Object> event_data;
-  v8::DebugEvent event = is_compile_error ? v8::CompileError : v8::AfterCompile;
-  if (isolate_->debug()
-          ->MakeCompileEvent(v8::Utils::OpenHandle(*script), event)
-          .ToHandle(&event_data)) {
-    ProcessDebugEvent(event, Handle<JSObject>::cast(event_data));
-  }
-}
-
-void LegacyDebugDelegate::BreakProgramRequested(
-    v8::Local<v8::Context> paused_context, v8::Local<v8::Object> exec_state,
-    const std::vector<debug::BreakpointId>&) {
-  ProcessDebugEvent(v8::Break, isolate_->factory()->NewJSObjectWithNullProto(),
-                    Handle<JSObject>::cast(v8::Utils::OpenHandle(*exec_state)));
-}
-
-void LegacyDebugDelegate::ExceptionThrown(v8::Local<v8::Context> paused_context,
-                                          v8::Local<v8::Object> exec_state,
-                                          v8::Local<v8::Value> exception,
-                                          v8::Local<v8::Value> promise,
-                                          bool is_uncaught) {
-  Handle<Object> event_data;
-  if (isolate_->debug()
-          ->MakeExceptionEvent(v8::Utils::OpenHandle(*exception), is_uncaught,
-                               v8::Utils::OpenHandle(*promise))
-          .ToHandle(&event_data)) {
-    ProcessDebugEvent(
-        v8::Exception, Handle<JSObject>::cast(event_data),
-        Handle<JSObject>::cast(v8::Utils::OpenHandle(*exec_state)));
-  }
-}
-
-void LegacyDebugDelegate::ProcessDebugEvent(v8::DebugEvent event,
-                                            Handle<JSObject> event_data) {
-  Handle<Object> exec_state;
-  if (isolate_->debug()->MakeExecutionState().ToHandle(&exec_state)) {
-    ProcessDebugEvent(event, event_data, Handle<JSObject>::cast(exec_state));
-  }
-}
-
-NativeDebugDelegate::NativeDebugDelegate(Isolate* isolate,
-                                         v8::Debug::EventCallback callback,
-                                         Handle<Object> data)
-    : LegacyDebugDelegate(isolate), callback_(callback) {
-  data_ = isolate->global_handles()->Create(*data);
-}
-
-NativeDebugDelegate::~NativeDebugDelegate() {
-  GlobalHandles::Destroy(data_.location());
-}
-
-NativeDebugDelegate::EventDetails::EventDetails(DebugEvent event,
-                                                Handle<JSObject> exec_state,
-                                                Handle<JSObject> event_data,
-                                                Handle<Object> callback_data)
-    : event_(event),
-      exec_state_(exec_state),
-      event_data_(event_data),
-      callback_data_(callback_data) {}
-
-DebugEvent NativeDebugDelegate::EventDetails::GetEvent() const {
-  return event_;
-}
-
-v8::Local<v8::Object> NativeDebugDelegate::EventDetails::GetExecutionState()
-    const {
-  return v8::Utils::ToLocal(exec_state_);
-}
-
-v8::Local<v8::Object> NativeDebugDelegate::EventDetails::GetEventData() const {
-  return v8::Utils::ToLocal(event_data_);
-}
-
-v8::Local<v8::Context> NativeDebugDelegate::EventDetails::GetEventContext()
-    const {
-  return GetDebugEventContext(exec_state_->GetIsolate());
-}
-
-v8::Local<v8::Value> NativeDebugDelegate::EventDetails::GetCallbackData()
-    const {
-  return v8::Utils::ToLocal(callback_data_);
-}
-
-v8::Isolate* NativeDebugDelegate::EventDetails::GetIsolate() const {
-  return reinterpret_cast<v8::Isolate*>(exec_state_->GetIsolate());
-}
-
-void NativeDebugDelegate::ProcessDebugEvent(v8::DebugEvent event,
-                                            Handle<JSObject> event_data,
-                                            Handle<JSObject> exec_state) {
-  EventDetails event_details(event, exec_state, event_data, data_);
-  Isolate* isolate = isolate_;
-  callback_(event_details);
-  CHECK(!isolate->has_scheduled_exception());
-}
-
 }  // namespace internal
 }  // namespace v8

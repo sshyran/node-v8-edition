@@ -374,7 +374,7 @@ bool JSObject::PrintProperties(std::ostream& os) {  // NOLINT
           break;
         }
         case kDescriptor:
-          os << Brief(descs->GetValue(i));
+          os << Brief(descs->GetStrongValue(i));
           break;
       }
       os << " ";
@@ -769,7 +769,7 @@ void Map::MapPrint(std::ostream& os) {  // NOLINT
   }
   {
     DisallowHeapAllocation no_gc;
-    TransitionsAccessor transitions(this, &no_gc);
+    TransitionsAccessor transitions(GetIsolate(), this, &no_gc);
     int nof_transitions = transitions.NumberOfTransitions();
     if (nof_transitions > 0) {
       os << "\n - transitions #" << nof_transitions << ": ";
@@ -1638,7 +1638,7 @@ void PrototypeInfo::PrototypeInfoPrint(std::ostream& os) {  // NOLINT
   os << "\n - weak cell: " << Brief(weak_cell());
   os << "\n - prototype users: " << Brief(prototype_users());
   os << "\n - registry slot: " << registry_slot();
-  os << "\n - object create map: " << Brief(object_create_map());
+  os << "\n - object create map: " << MaybeObjectBrief(object_create_map());
   os << "\n - should_be_fast_map: " << should_be_fast_map();
   os << "\n";
 }
@@ -2176,14 +2176,14 @@ void DescriptorArray::PrintDescriptorDetails(std::ostream& os, int descriptor,
   PropertyDetails details = GetDetails(descriptor);
   details.PrintAsFastTo(os, mode);
   os << " @ ";
-  Object* value = GetValue(descriptor);
   switch (details.location()) {
     case kField: {
-      FieldType* field_type = Map::UnwrapFieldType(value);
+      FieldType* field_type = GetFieldType(descriptor);
       field_type->PrintTo(os);
       break;
     }
     case kDescriptor:
+      Object* value = GetStrongValue(descriptor);
       os << Brief(value);
       if (value->IsAccessorPair()) {
         AccessorPair* pair = AccessorPair::cast(value);
@@ -2237,7 +2237,7 @@ void TransitionsAccessor::PrintOneTransition(std::ostream& os, Name* key,
   } else if (key == heap->strict_function_transition_symbol()) {
     os << " (transition to strict function)";
   } else {
-    DCHECK(!IsSpecialTransition(key));
+    DCHECK(!IsSpecialTransition(key->GetIsolate(), key));
     os << "(transition to ";
     int descriptor = target->LastAdded();
     DescriptorArray* descriptors = target->instance_descriptors();
@@ -2302,7 +2302,7 @@ void TransitionsAccessor::PrintTransitionTree(std::ostream& os, int level,
     ss << Brief(target);
     os << std::left << std::setw(50) << ss.str() << ": ";
 
-    Heap* heap = key->GetHeap();
+    Heap* heap = isolate_->heap();
     if (key == heap->nonextensible_symbol()) {
       os << "to non-extensible";
     } else if (key == heap->sealed_symbol()) {
@@ -2320,21 +2320,21 @@ void TransitionsAccessor::PrintTransitionTree(std::ostream& os, int level,
       key->ShortPrint(os);
 #endif
       os << " ";
-      DCHECK(!IsSpecialTransition(key));
+      DCHECK(!IsSpecialTransition(isolate_, key));
       os << "to ";
       int descriptor = target->LastAdded();
       DescriptorArray* descriptors = target->instance_descriptors();
       descriptors->PrintDescriptorDetails(os, descriptor,
                                           PropertyDetails::kForTransitions);
     }
-    TransitionsAccessor transitions(target, no_gc);
+    TransitionsAccessor transitions(isolate_, target, no_gc);
     transitions.PrintTransitionTree(os, level + 1, no_gc);
   }
 }
 
 void JSObject::PrintTransitions(std::ostream& os) {  // NOLINT
   DisallowHeapAllocation no_gc;
-  TransitionsAccessor ta(map(), &no_gc);
+  TransitionsAccessor ta(GetIsolate(), map(), &no_gc);
   if (ta.NumberOfTransitions() == 0) return;
   os << "\n - transitions";
   ta.PrintTransitions(os);
@@ -2437,8 +2437,8 @@ extern void _v8_internal_Print_TransitionTree(void* object) {
   } else {
 #if defined(DEBUG) || defined(OBJECT_PRINT)
     i::DisallowHeapAllocation no_gc;
-    i::TransitionsAccessor transitions(reinterpret_cast<i::Map*>(object),
-                                       &no_gc);
+    i::Map* map = reinterpret_cast<i::Map*>(object);
+    i::TransitionsAccessor transitions(map->GetIsolate(), map, &no_gc);
     transitions.PrintTransitionTree();
 #endif
   }

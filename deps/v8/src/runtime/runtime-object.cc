@@ -687,24 +687,6 @@ RUNTIME_FUNCTION(Runtime_GetOwnPropertyKeys) {
 }
 
 
-// Return information on whether an object has a named or indexed interceptor.
-// args[0]: object
-RUNTIME_FUNCTION(Runtime_GetInterceptorInfo) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  if (!args[0]->IsJSObject()) {
-    return Smi::kZero;
-  }
-  CONVERT_ARG_HANDLE_CHECKED(JSObject, obj, 0);
-
-  int result = 0;
-  if (obj->HasNamedInterceptor()) result |= 2;
-  if (obj->HasIndexedInterceptor()) result |= 1;
-
-  return Smi::FromInt(result);
-}
-
-
 RUNTIME_FUNCTION(Runtime_ToFastProperties) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -803,7 +785,7 @@ RUNTIME_FUNCTION(Runtime_DefineDataPropertyInLiteral) {
   FeedbackNexus nexus(vector, FeedbackVector::ToSlot(index));
   if (nexus.ic_state() == UNINITIALIZED) {
     if (name->IsUniqueName()) {
-      nexus.ConfigureMonomorphic(name, handle(object->map()),
+      nexus.ConfigureMonomorphic(name, handle(object->map(), isolate),
                                  MaybeObjectHandle());
     } else {
       nexus.ConfigureMegamorphic(PROPERTY);
@@ -860,7 +842,7 @@ RUNTIME_FUNCTION(Runtime_CollectTypeProfile) {
   } else if (value->IsNull(isolate)) {
     // typeof(null) is object. But it's more user-friendly to annotate
     // null as type "null".
-    type = Handle<String>(isolate->heap()->null_string());
+    type = Handle<String>(isolate->heap()->null_string(), isolate);
   }
 
   DCHECK(vector->metadata()->HasTypeProfileSlot());

@@ -415,7 +415,6 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
                                                                 \
   V(FIXED_ARRAY_TYPE)                                           \
   V(BOILERPLATE_DESCRIPTION_TYPE)                               \
-  V(DESCRIPTOR_ARRAY_TYPE)                                      \
   V(HASH_TABLE_TYPE)                                            \
   V(SCOPE_INFO_TYPE)                                            \
                                                                 \
@@ -430,6 +429,7 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
   V(WITH_CONTEXT_TYPE)                                          \
                                                                 \
   V(WEAK_FIXED_ARRAY_TYPE)                                      \
+  V(DESCRIPTOR_ARRAY_TYPE)                                      \
   V(TRANSITION_ARRAY_TYPE)                                      \
                                                                 \
   V(CALL_HANDLER_INFO_TYPE)                                     \
@@ -798,7 +798,6 @@ enum InstanceType : uint16_t {
   // FixedArrays.
   FIXED_ARRAY_TYPE,  // FIRST_FIXED_ARRAY_TYPE
   BOILERPLATE_DESCRIPTION_TYPE,
-  DESCRIPTOR_ARRAY_TYPE,
   HASH_TABLE_TYPE,
   SCOPE_INFO_TYPE,
   BLOCK_CONTEXT_TYPE,  // FIRST_CONTEXT_TYPE
@@ -812,6 +811,7 @@ enum InstanceType : uint16_t {
   WITH_CONTEXT_TYPE,  // LAST_FIXED_ARRAY_TYPE, LAST_CONTEXT_TYPE
 
   WEAK_FIXED_ARRAY_TYPE,  // FIRST_WEAK_FIXED_ARRAY_TYPE
+  DESCRIPTOR_ARRAY_TYPE,
   TRANSITION_ARRAY_TYPE,  // LAST_WEAK_FIXED_ARRAY_TYPE
 
   // Misc.
@@ -1776,10 +1776,18 @@ class HeapObject: public Object {
   inline void set_map_word(MapWord map_word);
 
   // The Heap the object was allocated in. Used also to access Isolate.
-  inline Heap* GetHeap() const;
+#ifdef DEPRECATE_GET_ISOLATE
+  [[deprecated("Pass Heap explicitly")]]
+#endif
+      inline Heap*
+      GetHeap() const;
 
-  // Convenience method to get current isolate.
-  inline Isolate* GetIsolate() const;
+// Convenience method to get current isolate.
+#ifdef DEPRECATE_GET_ISOLATE
+  [[deprecated("Pass Isolate explicitly")]]
+#endif
+      inline Isolate*
+      GetIsolate() const;
 
 #define IS_TYPE_FUNCTION_DECL(Type) INLINE(bool Is##Type() const);
   HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
@@ -3023,15 +3031,17 @@ class PrototypeInfo : public Struct {
   static const int kPrototypeUsersOffset = kWeakCellOffset + kPointerSize;
   static const int kRegistrySlotOffset = kPrototypeUsersOffset + kPointerSize;
   static const int kValidityCellOffset = kRegistrySlotOffset + kPointerSize;
-  static const int kObjectCreateMap = kValidityCellOffset + kPointerSize;
-  static const int kBitFieldOffset = kObjectCreateMap + kPointerSize;
+  static const int kObjectCreateMapOffset = kValidityCellOffset + kPointerSize;
+  static const int kBitFieldOffset = kObjectCreateMapOffset + kPointerSize;
   static const int kSize = kBitFieldOffset + kPointerSize;
 
   // Bit field usage.
   static const int kShouldBeFastBit = 0;
 
+  class BodyDescriptor;
+
  private:
-  DECL_ACCESSORS(object_create_map, Object)
+  DECL_ACCESSORS(object_create_map, MaybeObject)
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(PrototypeInfo);
 };
@@ -3194,9 +3204,6 @@ enum BuiltinFunctionId {
   FUNCTIONS_WITH_ID_LIST(DECL_FUNCTION_ID)
       ATOMIC_FUNCTIONS_WITH_ID_LIST(DECL_FUNCTION_ID)
 #undef DECL_FUNCTION_ID
-  // Fake id for a special case of Math.pow. Note, it continues the
-  // list of math functions.
-  kMathPowHalf,
   // These are manually assigned to special getters during bootstrapping.
   kArrayBufferByteLength,
   kArrayBufferIsView,
