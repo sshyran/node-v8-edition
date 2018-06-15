@@ -210,7 +210,7 @@ TEST(ToUint32) {
 }
 
 namespace {
-void IsValidPositiveSmiCase(Isolate* isolate, intptr_t value, bool expected) {
+void IsValidPositiveSmiCase(Isolate* isolate, intptr_t value) {
   const int kNumParams = 0;
   CodeAssemblerTester asm_tester(isolate, kNumParams);
 
@@ -221,6 +221,7 @@ void IsValidPositiveSmiCase(Isolate* isolate, intptr_t value, bool expected) {
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   MaybeHandle<Object> maybe_handle = ft.Call();
 
+  bool expected = i::PlatformSmiTagging::IsValidSmi(value) && (value >= 0);
   if (expected) {
     CHECK(maybe_handle.ToHandleChecked()->IsTrue(isolate));
   } else {
@@ -232,23 +233,23 @@ void IsValidPositiveSmiCase(Isolate* isolate, intptr_t value, bool expected) {
 TEST(IsValidPositiveSmi) {
   Isolate* isolate(CcTest::InitIsolateOnce());
 
-  IsValidPositiveSmiCase(isolate, -1, false);
-  IsValidPositiveSmiCase(isolate, 0, true);
-  IsValidPositiveSmiCase(isolate, 1, true);
+  IsValidPositiveSmiCase(isolate, -1);
+  IsValidPositiveSmiCase(isolate, 0);
+  IsValidPositiveSmiCase(isolate, 1);
 
-#ifdef V8_TARGET_ARCH_32_BIT
-  IsValidPositiveSmiCase(isolate, 0x3FFFFFFFU, true);
-  IsValidPositiveSmiCase(isolate, 0xC0000000U, false);
-  IsValidPositiveSmiCase(isolate, 0x40000000U, false);
-  IsValidPositiveSmiCase(isolate, 0xBFFFFFFFU, false);
-#else
+  IsValidPositiveSmiCase(isolate, 0x3FFFFFFFU);
+  IsValidPositiveSmiCase(isolate, 0xC0000000U);
+  IsValidPositiveSmiCase(isolate, 0x40000000U);
+  IsValidPositiveSmiCase(isolate, 0xBFFFFFFFU);
+
   typedef std::numeric_limits<int32_t> int32_limits;
-  IsValidPositiveSmiCase(isolate, int32_limits::max(), true);
-  IsValidPositiveSmiCase(isolate, int32_limits::min(), false);
+  IsValidPositiveSmiCase(isolate, int32_limits::max());
+  IsValidPositiveSmiCase(isolate, int32_limits::min());
+#ifdef V8_TARGET_ARCH_64_BIT
   IsValidPositiveSmiCase(isolate,
-                         static_cast<intptr_t>(int32_limits::max()) + 1, false);
+                         static_cast<intptr_t>(int32_limits::max()) + 1);
   IsValidPositiveSmiCase(isolate,
-                         static_cast<intptr_t>(int32_limits::min()) - 1, false);
+                         static_cast<intptr_t>(int32_limits::min()) - 1);
 #endif
 }
 
@@ -395,9 +396,10 @@ TEST(ToString) {
   test_cases->set(4, *tostring_test);
 
   for (int i = 0; i < 5; ++i) {
-    Handle<FixedArray> test = handle(FixedArray::cast(test_cases->get(i)));
+    Handle<FixedArray> test =
+        handle(FixedArray::cast(test_cases->get(i)), isolate);
     Handle<Object> obj = handle(test->get(0), isolate);
-    Handle<String> expected = handle(String::cast(test->get(1)));
+    Handle<String> expected = handle(String::cast(test->get(1)), isolate);
     Handle<Object> result = ft.Call(obj).ToHandleChecked();
     CHECK(result->IsString());
     CHECK(String::Equals(Handle<String>::cast(result), expected));
@@ -2548,8 +2550,8 @@ TEST(NewPromiseCapability) {
              JSFunction::cast(result->resolve())->shared());
 
     Handle<JSFunction> callbacks[] = {
-        handle(JSFunction::cast(result->resolve())),
-        handle(JSFunction::cast(result->reject()))};
+        handle(JSFunction::cast(result->resolve()), isolate),
+        handle(JSFunction::cast(result->reject()), isolate)};
 
     for (auto&& callback : callbacks) {
       Handle<Context> context(Context::cast(callback->context()));
@@ -2920,8 +2922,9 @@ TEST(IsNumberArrayIndex) {
   CodeAssemblerTester asm_tester(isolate, kNumParams);
   {
     CodeStubAssembler m(asm_tester.state());
-    m.Return(m.SmiFromInt32(
-        m.UncheckedCast<Int32T>(m.IsNumberArrayIndex(m.Parameter(0)))));
+    TNode<Number> number = m.CAST(m.Parameter(0));
+    m.Return(
+        m.SmiFromInt32(m.UncheckedCast<Int32T>(m.IsNumberArrayIndex(number))));
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
@@ -3307,6 +3310,55 @@ TEST(SingleInputPhiElimination) {
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   // Generating code without an assert is enough to make sure that the
   // single-input phi is properly eliminated.
+}
+
+TEST(IsDoubleElementsKind) {
+  Isolate* isolate(CcTest::InitIsolateOnce());
+  const int kNumParams = 2;
+  CodeAssemblerTester ft_tester(isolate, kNumParams);
+  {
+    CodeStubAssembler m(ft_tester.state());
+    m.Return(m.SmiFromInt32(m.UncheckedCast<Int32T>(
+        m.IsDoubleElementsKind(m.SmiToInt32(m.Parameter(0))))));
+  }
+  FunctionTester ft(ft_tester.GenerateCode(), kNumParams);
+  CHECK_EQ(
+      (*Handle<Smi>::cast(
+           ft.Call(Handle<Smi>(Smi::FromInt(PACKED_DOUBLE_ELEMENTS), isolate))
+               .ToHandleChecked()))
+          ->value(),
+      1);
+  CHECK_EQ(
+      (*Handle<Smi>::cast(
+           ft.Call(Handle<Smi>(Smi::FromInt(HOLEY_DOUBLE_ELEMENTS), isolate))
+               .ToHandleChecked()))
+          ->value(),
+      1);
+  CHECK_EQ((*Handle<Smi>::cast(
+                ft.Call(Handle<Smi>(Smi::FromInt(HOLEY_ELEMENTS), isolate))
+                    .ToHandleChecked()))
+               ->value(),
+           0);
+  CHECK_EQ((*Handle<Smi>::cast(
+                ft.Call(Handle<Smi>(Smi::FromInt(PACKED_ELEMENTS), isolate))
+                    .ToHandleChecked()))
+               ->value(),
+           0);
+  CHECK_EQ((*Handle<Smi>::cast(
+                ft.Call(Handle<Smi>(Smi::FromInt(PACKED_SMI_ELEMENTS), isolate))
+                    .ToHandleChecked()))
+               ->value(),
+           0);
+  CHECK_EQ((*Handle<Smi>::cast(
+                ft.Call(Handle<Smi>(Smi::FromInt(HOLEY_SMI_ELEMENTS), isolate))
+                    .ToHandleChecked()))
+               ->value(),
+           0);
+  CHECK_EQ((*Handle<Smi>::cast(
+                ft.Call(Handle<Smi>(Smi::FromInt(DICTIONARY_ELEMENTS), isolate))
+                    .ToHandleChecked()))
+               ->value(),
+           0);
 }
 
 }  // namespace compiler

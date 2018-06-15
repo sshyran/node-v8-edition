@@ -55,6 +55,13 @@ ROOT_LIST(ROOT_ACCESSOR)
 STRUCT_LIST(STRUCT_MAP_ACCESSOR)
 #undef STRUCT_MAP_ACCESSOR
 
+#define ALLOCATION_SITE_MAP_ACCESSOR(NAME, Name, Size, name) \
+  Map* Heap::name##_map() {                                  \
+    return Map::cast(roots_[k##Name##Size##MapRootIndex]);   \
+  }
+ALLOCATION_SITE_LIST(ALLOCATION_SITE_MAP_ACCESSOR)
+#undef ALLOCATION_SITE_MAP_ACCESSOR
+
 #define DATA_HANDLER_MAP_ACCESSOR(NAME, Name, Size, name)  \
   Map* Heap::name##_map() {                                \
     return Map::cast(roots_[k##Name##Size##MapRootIndex]); \
@@ -334,17 +341,20 @@ bool Heap::InNewSpace(HeapObject* heap_object) {
   return result;
 }
 
+// static
 bool Heap::InFromSpace(Object* object) {
   DCHECK(!HasWeakHeapObjectTag(object));
   return object->IsHeapObject() && InFromSpace(HeapObject::cast(object));
 }
 
+// static
 bool Heap::InFromSpace(MaybeObject* object) {
   HeapObject* heap_object;
   return object->ToStrongOrWeakHeapObject(&heap_object) &&
          InFromSpace(heap_object);
 }
 
+// static
 bool Heap::InFromSpace(HeapObject* heap_object) {
   return MemoryChunk::FromHeapObject(heap_object)
       ->IsFlagSet(Page::IN_FROM_SPACE);

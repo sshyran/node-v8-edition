@@ -78,7 +78,9 @@ CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
           SourcePositionTableBuilder::RECORD_SOURCE_POSITIONS),
       wasm_compilation_data_(wasm_compilation_data),
       result_(kSuccess),
-      poisoning_level_(poisoning_level) {
+      poisoning_level_(poisoning_level),
+      block_starts_(zone()),
+      instr_starts_(zone()) {
   for (int i = 0; i < code->InstructionBlockCount(); ++i) {
     new (&labels_[i]) Label;
   }
@@ -89,6 +91,11 @@ CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
   if (code_kind == Code::JS_TO_WASM_FUNCTION ||
       code_kind == Code::WASM_FUNCTION) {
     tasm_.enable_serializer();
+  }
+  if (code_kind == Code::WASM_FUNCTION ||
+      code_kind == Code::WASM_TO_JS_FUNCTION ||
+      code_kind == Code::WASM_INTERPRETER_ENTRY) {
+    tasm_.set_trap_on_abort(true);
   }
 }
 
@@ -111,26 +118,10 @@ void CodeGenerator::CreateFrameAccessState(Frame* frame) {
 CodeGenerator::CodeGenResult CodeGenerator::AssembleDeoptimizerCall(
     int deoptimization_id, SourcePosition pos) {
   DeoptimizeKind deopt_kind = GetDeoptimizationKind(deoptimization_id);
-  Deoptimizer::BailoutType bailout_type;
-  switch (deopt_kind) {
-    case DeoptimizeKind::kSoft: {
-      bailout_type = Deoptimizer::SOFT;
-      break;
-    }
-    case DeoptimizeKind::kEager: {
-      bailout_type = Deoptimizer::EAGER;
-      break;
-    }
-    case DeoptimizeKind::kLazy: {
-      bailout_type = Deoptimizer::LAZY;
-      break;
-    }
-    default: { UNREACHABLE(); }
-  }
   DeoptimizeReason deoptimization_reason =
       GetDeoptimizationReason(deoptimization_id);
   Address deopt_entry = Deoptimizer::GetDeoptimizationEntry(
-      tasm()->isolate(), deoptimization_id, bailout_type);
+      tasm()->isolate(), deoptimization_id, deopt_kind);
   if (deopt_entry == kNullAddress) return kTooManyDeoptimizationBailouts;
   if (info()->is_source_positions_enabled()) {
     tasm()->RecordDeoptReason(deoptimization_reason, pos, deoptimization_id);
@@ -190,6 +181,10 @@ void CodeGenerator::AssembleCode() {
   unwinding_info_writer_.SetNumberOfInstructionBlocks(
       code()->InstructionBlockCount());
 
+  if (info->trace_turbo_json_enabled()) {
+    block_starts_.assign(code()->instruction_blocks().size(), -1);
+    instr_starts_.assign(code()->instructions().size(), -1);
+  }
   // Assemble all non-deferred blocks, followed by deferred ones.
   for (int deferred = 0; deferred < 2; ++deferred) {
     for (const InstructionBlock* block : code()->instruction_blocks()) {
@@ -200,6 +195,9 @@ void CodeGenerator::AssembleCode() {
       // Align loop headers on 16-byte boundaries.
       if (block->IsLoopHeader() && !tasm()->jump_optimization_info()) {
         tasm()->Align(16);
+      }
+      if (info->trace_turbo_json_enabled()) {
+        block_starts_[block->rpo_number().ToInt()] = tasm()->pc_offset();
       }
       // Bind a label for a block.
       current_block_ = block->rpo_number();
@@ -447,6 +445,9 @@ bool CodeGenerator::IsMaterializableFromRoot(
 CodeGenerator::CodeGenResult CodeGenerator::AssembleBlock(
     const InstructionBlock* block) {
   for (int i = block->code_start(); i < block->code_end(); ++i) {
+    if (info()->trace_turbo_json_enabled()) {
+      instr_starts_[i] = tasm()->pc_offset();
+    }
     Instruction* instr = code()->InstructionAt(i);
     CodeGenResult result = AssembleInstruction(instr, block);
     if (result != kSuccess) return result;
@@ -730,6 +731,14 @@ bool CodeGenerator::GetSlotAboveSPBeforeTailCall(Instruction* instr,
   } else {
     return false;
   }
+}
+
+StubCallMode CodeGenerator::DetermineStubCallMode() const {
+  Code::Kind code_kind = info()->code_kind();
+  return (code_kind == Code::WASM_FUNCTION ||
+          code_kind == Code::WASM_TO_JS_FUNCTION)
+             ? StubCallMode::kCallWasmRuntimeStub
+             : StubCallMode::kCallOnHeapBuiltin;
 }
 
 void CodeGenerator::AssembleGaps(Instruction* instr) {

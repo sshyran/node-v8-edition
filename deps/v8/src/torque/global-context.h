@@ -22,8 +22,10 @@ class TypeOracle;
 
 class Module {
  public:
-  explicit Module(const std::string& name) : name_(name) {}
+  explicit Module(const std::string& name, bool is_default)
+      : name_(name), is_default_(is_default) {}
   const std::string& name() const { return name_; }
+  bool IsDefault() const { return is_default_; }
   std::ostream& source_stream() { return source_stream_; }
   std::ostream& header_stream() { return header_stream_; }
   std::string source() { return source_stream_.str(); }
@@ -31,15 +33,9 @@ class Module {
 
  private:
   std::string name_;
+  bool is_default_;
   std::stringstream header_stream_;
   std::stringstream source_stream_;
-};
-
-class OperationHandler {
- public:
-  std::string macro_name;
-  ParameterTypes parameter_types;
-  const Type* result_type;
 };
 
 struct SourceFileContext {
@@ -56,15 +52,15 @@ class GlobalContext {
   explicit GlobalContext(Ast ast)
       : verbose_(false),
         next_label_number_(0),
-        default_module_(GetModule("base")),
+        default_module_(GetModule("base", true)),
         ast_(std::move(ast)) {}
   Module* GetDefaultModule() { return default_module_; }
-  Module* GetModule(const std::string& name) {
+  Module* GetModule(const std::string& name, bool is_default = false) {
     auto i = modules_.find(name);
     if (i != modules_.end()) {
       return i->second.get();
     }
-    Module* module = new Module(name);
+    Module* module = new Module(name, is_default);
     modules_[name] = std::unique_ptr<Module>(module);
     return module;
   }
@@ -108,8 +104,6 @@ class GlobalContext {
   Label* GetCurrentContinue() const {
     return break_continue_stack_.back().second;
   }
-
-  std::map<std::string, std::vector<OperationHandler>> op_handlers_;
 
   Declarations* declarations() { return &declarations_; }
   Ast* ast() { return &ast_; }

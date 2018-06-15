@@ -206,17 +206,24 @@ class OutOfLineLoadFloat64NaN final : public OutOfLineCode {
 class OutOfLineTruncateDoubleToI final : public OutOfLineCode {
  public:
   OutOfLineTruncateDoubleToI(CodeGenerator* gen, Register result,
-                             XMMRegister input)
+                             XMMRegister input, StubCallMode stub_mode)
       : OutOfLineCode(gen),
         result_(result),
         input_(input),
+        stub_mode_(stub_mode),
         isolate_(gen->isolate()),
         zone_(gen->zone()) {}
 
   void Generate() final {
     __ sub(esp, Immediate(kDoubleSize));
     __ movsd(MemOperand(esp, 0), input_);
-    __ Call(BUILTIN_CODE(isolate_, DoubleToI), RelocInfo::CODE_TARGET);
+    if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
+      // A direct call to a wasm runtime stub defined in this module.
+      // Just encode the stub index. This will be patched at relocation.
+      __ wasm_call(wasm::WasmCode::kDoubleToI, RelocInfo::WASM_STUB_CALL);
+    } else {
+      __ Call(BUILTIN_CODE(isolate_, DoubleToI), RelocInfo::CODE_TARGET);
+    }
     __ mov(result_, MemOperand(esp, 0));
     __ add(esp, Immediate(kDoubleSize));
   }
@@ -224,6 +231,7 @@ class OutOfLineTruncateDoubleToI final : public OutOfLineCode {
  private:
   Register const result_;
   XMMRegister const input_;
+  StubCallMode stub_mode_;
   Isolate* isolate_;
   Zone* zone_;
 };
@@ -606,7 +614,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (HasImmediateInput(instr, 0)) {
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt32());
-        if (info()->IsWasm()) {
+        if (DetermineStubCallMode() == StubCallMode::kCallWasmRuntimeStub) {
           __ wasm_call(wasm_code, constant.rmode());
         } else {
           if (HasCallDescriptorFlag(instr, CallDescriptor::kRetpoline)) {
@@ -830,7 +838,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTruncateDoubleToI: {
       auto result = i.OutputRegister();
       auto input = i.InputDoubleRegister(0);
-      auto ool = new (zone()) OutOfLineTruncateDoubleToI(this, result, input);
+      auto ool = new (zone()) OutOfLineTruncateDoubleToI(
+          this, result, input, DetermineStubCallMode());
       __ cvttsd2si(result, Operand(input));
       __ cmp(result, 1);
       __ j(overflow, ool->entry());
@@ -3139,13 +3148,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       XMMRegister dst = i.OutputSimd128Register();
       Operand src0 = i.InputOperand(0);
       Register tmp = i.TempRegister(0);
-      if (!src0.is_reg(dst)) {
-        __ movups(dst, src0);
-      }
-      // Prepare 16-byte boundary buffer for shuffle control mask
+      // Prepare 16 byte aligned buffer for shuffle control mask
       __ mov(tmp, esp);
       __ and_(esp, -16);
       if (instr->InputCount() == 5) {  // only one input operand
+        DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
         for (int j = 4; j > 0; j--) {
           uint32_t mask = i.InputUint32(j);
           __ push(Immediate(mask));
@@ -3153,6 +3160,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Pshufb(dst, Operand(esp, 0));
       } else {  // two input operands
         DCHECK_EQ(6, instr->InputCount());
+        __ movups(kScratchDoubleReg, src0);
         for (int j = 5; j > 1; j--) {
           uint32_t lanes = i.InputUint32(j);
           uint32_t mask = 0;
@@ -3162,8 +3170,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           }
           __ push(Immediate(mask));
         }
-        __ Pshufb(dst, Operand(esp, 0));
-        __ movups(kScratchDoubleReg, i.InputOperand(1));
+        __ Pshufb(kScratchDoubleReg, Operand(esp, 0));
+        Operand src1 = i.InputOperand(1);
+        if (!src1.is_reg(dst)) __ movups(dst, src1);
         for (int j = 5; j > 1; j--) {
           uint32_t lanes = i.InputUint32(j);
           uint32_t mask = 0;
@@ -3173,74 +3182,55 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           }
           __ push(Immediate(mask));
         }
-        __ Pshufb(kScratchDoubleReg, Operand(esp, 0));
+        __ Pshufb(dst, Operand(esp, 0));
         __ por(dst, kScratchDoubleReg);
       }
       __ mov(esp, tmp);
       break;
     }
     case kIA32S32x4Swizzle: {
-      __ Pshufd(i.OutputSimd128Register(), i.InputOperand(0), i.InputInt8(2));
+      DCHECK_EQ(2, instr->InputCount());
+      __ Pshufd(i.OutputSimd128Register(), i.InputOperand(0), i.InputInt8(1));
       break;
     }
     case kIA32S32x4Shuffle: {
       DCHECK_EQ(4, instr->InputCount());  // Swizzles should be handled above.
-      __ Pshufd(i.OutputSimd128Register(), i.InputOperand(0), i.InputInt8(2));
       __ Pshufd(kScratchDoubleReg, i.InputOperand(1), i.InputInt8(2));
+      __ Pshufd(i.OutputSimd128Register(), i.InputOperand(0), i.InputInt8(2));
       __ Pblendw(i.OutputSimd128Register(), kScratchDoubleReg, i.InputInt8(3));
       break;
     }
     case kSSES16x8Blend: {
-      CpuFeatureScope sse_scope(tasm(), SSSE3);
-      if (instr->InputCount() == 2) {
-        // swizzle
-        __ pblendw(i.OutputSimd128Register(), i.InputOperand(0),
-                   i.InputInt8(1));
-      } else {
-        // shuffle
-        DCHECK_EQ(3, instr->InputCount());
-        DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-        __ pblendw(i.OutputSimd128Register(), i.InputOperand(1),
-                   i.InputInt8(2));
-      }
+      CpuFeatureScope sse_scope(tasm(), SSE4_1);
+      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ pblendw(i.OutputSimd128Register(), i.InputOperand(1), i.InputInt8(2));
       break;
     }
     case kAVXS16x8Blend: {
-      CpuFeatureScope avx_scope(tasm(), AVX);
+      CpuFeatureScope sse_scope(tasm(), AVX);
       __ vpblendw(i.OutputSimd128Register(), i.InputSimd128Register(0),
                   i.InputOperand(1), i.InputInt8(2));
       break;
     }
-    case kIA32S16x8ShuffleBlend: {
+    case kIA32S16x8HalfShuffle1: {
       XMMRegister dst = i.OutputSimd128Register();
-      if (instr->InputCount() == 3) {
-        // swizzle
-        __ Pshuflw(dst, i.InputOperand(0), i.InputInt8(1));
-        __ Pshufhw(dst, dst, i.InputInt8(2));
-      } else {
-        // shuffle
-        DCHECK_EQ(5, instr->InputCount());
-        __ Pshuflw(dst, i.InputOperand(0), i.InputInt8(2));
-        __ Pshufhw(dst, dst, i.InputInt8(3));
-        __ Pshuflw(kScratchDoubleReg, i.InputOperand(1), i.InputInt8(2));
-        __ Pshufhw(kScratchDoubleReg, kScratchDoubleReg, i.InputInt8(3));
-        __ Pblendw(dst, kScratchDoubleReg, i.InputInt8(4));
-      }
+      __ Pshuflw(dst, i.InputOperand(0), i.InputInt8(1));
+      __ Pshufhw(dst, dst, i.InputInt8(2));
+      break;
+    }
+    case kIA32S16x8HalfShuffle2: {
+      XMMRegister dst = i.OutputSimd128Register();
+      __ Pshuflw(kScratchDoubleReg, i.InputOperand(1), i.InputInt8(2));
+      __ Pshufhw(kScratchDoubleReg, kScratchDoubleReg, i.InputInt8(3));
+      __ Pshuflw(dst, i.InputOperand(0), i.InputInt8(2));
+      __ Pshufhw(dst, dst, i.InputInt8(3));
+      __ Pblendw(dst, kScratchDoubleReg, i.InputInt8(4));
       break;
     }
     case kSSES8x16Alignr: {
       CpuFeatureScope sse_scope(tasm(), SSSE3);
-      if (instr->InputCount() == 2) {
-        // swizzle
-        __ palignr(i.OutputSimd128Register(), i.InputOperand(0),
-                   i.InputInt8(1));
-      } else {
-        // shuffle
-        DCHECK_EQ(3, instr->InputCount());
-        DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
-        __ palignr(i.OutputSimd128Register(), i.InputOperand(1),
-                   i.InputInt8(2));
-      }
+      DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ palignr(i.OutputSimd128Register(), i.InputOperand(1), i.InputInt8(2));
       break;
     }
     case kAVXS8x16Alignr: {
@@ -3797,8 +3787,10 @@ void CodeGenerator::AssembleConstructFrame() {
         __ set_has_frame(true);
         __ EnterFrame(StackFrame::WASM_COMPILED);
       }
+      __ mov(ecx, FieldOperand(kWasmInstanceRegister,
+                               WasmInstanceObject::kCEntryStubOffset));
       __ Move(esi, Smi::kZero);
-      __ CallRuntimeDelayed(zone(), Runtime::kThrowWasmStackOverflow);
+      __ CallRuntimeWithCEntry(Runtime::kThrowWasmStackOverflow, ecx);
       ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
       RecordSafepoint(reference_map, Safepoint::kSimple, 0,
                       Safepoint::kNoLazyDeopt);

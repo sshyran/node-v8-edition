@@ -30,6 +30,7 @@
 #include "src/heap/embedder-tracing.h"
 #include "src/heap/gc-idle-time-handler.h"
 #include "src/heap/gc-tracer.h"
+#include "src/heap/heap-controller.h"
 #include "src/heap/incremental-marking.h"
 #include "src/heap/item-parallel-job.h"
 #include "src/heap/mark-compact-inl.h"
@@ -240,7 +241,6 @@ Heap::Heap()
   memset(roots_, 0, sizeof(roots_[0]) * kRootListLength);
   set_native_contexts_list(nullptr);
   set_allocation_sites_list(Smi::kZero);
-  set_encountered_weak_collections(Smi::kZero);
   // Put a dummy entry in the remembered pages so we can find the list the
   // minidump even if there are no real unmapped pages.
   RememberUnmappedPage(kNullAddress, false);
@@ -250,6 +250,15 @@ size_t Heap::MaxReserved() {
   const double kFactor = Page::kPageSize * 1.0 / Page::kAllocatableMemory;
   return static_cast<size_t>(
       (2 * max_semi_space_size_ + max_old_generation_size_) * kFactor);
+}
+
+size_t Heap::ComputeMaxOldGenerationSize(uint64_t physical_memory) {
+  const size_t old_space_physical_memory_factor = 4;
+  size_t computed_size = static_cast<size_t>(physical_memory / i::MB /
+                                             old_space_physical_memory_factor *
+                                             kPointerMultiplier);
+  return Max(Min(computed_size, HeapController::kMaxOldGenerationSize),
+             HeapController::kMinOldGenerationSize);
 }
 
 size_t Heap::Capacity() {
@@ -279,6 +288,13 @@ size_t Heap::CommittedOldGenerationMemory() {
     total += space->CommittedMemory();
   }
   return total + lo_space_->Size();
+}
+
+size_t Heap::CommittedMemoryOfHeapAndUnmapper() {
+  if (!HasBeenSetUp()) return 0;
+
+  return CommittedMemory() +
+         memory_allocator()->unmapper()->CommittedBufferedMemory();
 }
 
 size_t Heap::CommittedMemory() {
@@ -336,9 +352,8 @@ bool Heap::CanExpandOldGeneration(size_t size) {
 }
 
 bool Heap::HasBeenSetUp() {
-  return old_space_ != nullptr && code_space_ != nullptr &&
-         map_space_ != nullptr && lo_space_ != nullptr &&
-         read_only_space_ != nullptr;
+  // We will always have a new space when the heap is set up.
+  return new_space_ != nullptr;
 }
 
 
@@ -431,6 +446,10 @@ void Heap::PrintShortHeapStatistics() {
                          ", committed: %6" PRIuS " KB\n",
                lo_space_->SizeOfObjects() / KB, lo_space_->Available() / KB,
                lo_space_->CommittedMemory() / KB);
+  PrintIsolate(isolate_,
+               "Unmapper buffering %d chunks of committed: %6" PRIuS " KB\n",
+               memory_allocator()->unmapper()->NumberOfChunks(),
+               CommittedMemoryOfHeapAndUnmapper() / KB);
   PrintIsolate(isolate_, "All spaces,         used: %6" PRIuS
                          " KB"
                          ", available: %6" PRIuS
@@ -508,16 +527,16 @@ void Heap::PrintRetainingPath(HeapObject* target, RetainingPathOption option) {
   HeapObject* object = target;
   std::vector<std::pair<HeapObject*, bool>> retaining_path;
   Root root = Root::kUnknown;
-  bool ephemeral = false;
+  bool ephemeron = false;
   while (true) {
-    retaining_path.push_back(std::make_pair(object, ephemeral));
-    if (option == RetainingPathOption::kTrackEphemeralPath &&
-        ephemeral_retainer_.count(object)) {
-      object = ephemeral_retainer_[object];
-      ephemeral = true;
+    retaining_path.push_back(std::make_pair(object, ephemeron));
+    if (option == RetainingPathOption::kTrackEphemeronPath &&
+        ephemeron_retainer_.count(object)) {
+      object = ephemeron_retainer_[object];
+      ephemeron = true;
     } else if (retainer_.count(object)) {
       object = retainer_[object];
-      ephemeral = false;
+      ephemeron = false;
     } else {
       if (retaining_root_.count(object)) {
         root = retaining_root_[object];
@@ -528,11 +547,11 @@ void Heap::PrintRetainingPath(HeapObject* target, RetainingPathOption option) {
   int distance = static_cast<int>(retaining_path.size());
   for (auto node : retaining_path) {
     HeapObject* object = node.first;
-    bool ephemeral = node.second;
+    bool ephemeron = node.second;
     PrintF("\n");
     PrintF("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
     PrintF("Distance from root %d%s: ", distance,
-           ephemeral ? " (ephemeral)" : "");
+           ephemeron ? " (ephemeron)" : "");
     object->ShortPrint();
     PrintF("\n");
 #ifdef OBJECT_PRINT
@@ -553,20 +572,20 @@ void Heap::AddRetainer(HeapObject* retainer, HeapObject* object) {
   RetainingPathOption option = RetainingPathOption::kDefault;
   if (IsRetainingPathTarget(object, &option)) {
     // Check if the retaining path was already printed in
-    // AddEphemeralRetainer().
-    if (ephemeral_retainer_.count(object) == 0 ||
+    // AddEphemeronRetainer().
+    if (ephemeron_retainer_.count(object) == 0 ||
         option == RetainingPathOption::kDefault) {
       PrintRetainingPath(object, option);
     }
   }
 }
 
-void Heap::AddEphemeralRetainer(HeapObject* retainer, HeapObject* object) {
-  if (ephemeral_retainer_.count(object)) return;
-  ephemeral_retainer_[object] = retainer;
+void Heap::AddEphemeronRetainer(HeapObject* retainer, HeapObject* object) {
+  if (ephemeron_retainer_.count(object)) return;
+  ephemeron_retainer_[object] = retainer;
   RetainingPathOption option = RetainingPathOption::kDefault;
   if (IsRetainingPathTarget(object, &option) &&
-      option == RetainingPathOption::kTrackEphemeralPath) {
+      option == RetainingPathOption::kTrackEphemeronPath) {
     // Check if the retaining path was already printed in AddRetainer().
     if (retainer_.count(object) == 0) {
       PrintRetainingPath(object, option);
@@ -627,7 +646,7 @@ void Heap::GarbageCollectionPrologue() {
   UpdateNewSpaceAllocationCounter();
   if (FLAG_track_retaining_path) {
     retainer_.clear();
-    ephemeral_retainer_.clear();
+    ephemeron_retainer_.clear();
     retaining_root_.clear();
   }
 }
@@ -1393,6 +1412,9 @@ bool Heap::CollectGarbage(AllocationSpace space,
 
       next_gc_likely_to_collect_more =
           PerformGarbageCollection(collector, gc_callback_flags);
+      if (collector == MARK_COMPACTOR) {
+        tracer()->RecordMarkCompactHistograms(gc_type_timer);
+      }
     }
 
     GarbageCollectionEpilogue();
@@ -1523,15 +1545,16 @@ void Heap::MoveElements(FixedArray* array, int dst_index, int src_index,
 // Helper class for verifying the string table.
 class StringTableVerifier : public ObjectVisitor {
  public:
+  explicit StringTableVerifier(Isolate* isolate) : isolate_(isolate) {}
+
   void VisitPointers(HeapObject* host, Object** start, Object** end) override {
     // Visit all HeapObject pointers in [start, end).
     for (Object** p = start; p < end; p++) {
       DCHECK(!HasWeakHeapObjectTag(*p));
       if ((*p)->IsHeapObject()) {
         HeapObject* object = HeapObject::cast(*p);
-        Isolate* isolate = object->GetIsolate();
         // Check that the string is actually internalized.
-        CHECK(object->IsTheHole(isolate) || object->IsUndefined(isolate) ||
+        CHECK(object->IsTheHole(isolate_) || object->IsUndefined(isolate_) ||
               object->IsInternalizedString());
       }
     }
@@ -1540,12 +1563,14 @@ class StringTableVerifier : public ObjectVisitor {
                      MaybeObject** end) override {
     UNREACHABLE();
   }
+
+ private:
+  Isolate* isolate_;
 };
 
-
-static void VerifyStringTable(Heap* heap) {
-  StringTableVerifier verifier;
-  heap->string_table()->IterateElements(&verifier);
+static void VerifyStringTable(Isolate* isolate) {
+  StringTableVerifier verifier(isolate);
+  isolate->heap()->string_table()->IterateElements(&verifier);
 }
 #endif  // VERIFY_HEAP
 
@@ -1694,7 +1719,7 @@ bool Heap::PerformGarbageCollection(
 
 #ifdef VERIFY_HEAP
   if (FLAG_verify_heap) {
-    VerifyStringTable(this);
+    VerifyStringTable(this->isolate());
   }
 #endif
 
@@ -1792,12 +1817,22 @@ bool Heap::PerformGarbageCollection(
     // Register the amount of external allocated memory.
     external_memory_at_last_mark_compact_ = external_memory_;
     external_memory_limit_ = external_memory_ + kExternalAllocationSoftLimit;
-    SetOldGenerationAllocationLimit(old_gen_size, gc_speed, mutator_speed);
+
+    size_t new_limit = heap_controller()->CalculateOldGenerationAllocationLimit(
+        old_gen_size, max_old_generation_size_, gc_speed, mutator_speed,
+        new_space()->Capacity(), CurrentHeapGrowingMode());
+    old_generation_allocation_limit_ = new_limit;
+
     CheckIneffectiveMarkCompact(
         old_gen_size, tracer()->AverageMarkCompactMutatorUtilization());
   } else if (HasLowYoungGenerationAllocationRate() &&
              old_generation_size_configured_) {
-    DampenOldGenerationAllocationLimit(old_gen_size, gc_speed, mutator_speed);
+    size_t new_limit = heap_controller()->CalculateOldGenerationAllocationLimit(
+        old_gen_size, max_old_generation_size_, gc_speed, mutator_speed,
+        new_space()->Capacity(), CurrentHeapGrowingMode());
+    if (new_limit < old_generation_allocation_limit_) {
+      old_generation_allocation_limit_ = new_limit;
+    }
   }
 
   {
@@ -1813,7 +1848,7 @@ bool Heap::PerformGarbageCollection(
 
 #ifdef VERIFY_HEAP
   if (FLAG_verify_heap) {
-    VerifyStringTable(this);
+    VerifyStringTable(this->isolate());
   }
 #endif
 
@@ -2157,11 +2192,6 @@ void Heap::Scavenge() {
       IterateRoots(&root_scavenge_visitor, VISIT_ALL_IN_SCAVENGE);
     }
     {
-      // Weak collections are held strongly by the Scavenger.
-      TRACE_GC(tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE_WEAK);
-      IterateEncounteredWeakCollections(&root_scavenge_visitor);
-    }
-    {
       // Parallel phase scavenging all copied and promoted objects.
       TRACE_GC(tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE_PARALLEL);
       job.Run(isolate()->async_counters());
@@ -2476,20 +2506,21 @@ void Heap::VisitExternalResources(v8::ExternalResourceVisitor* visitor) {
   class ExternalStringTableVisitorAdapter : public RootVisitor {
    public:
     explicit ExternalStringTableVisitorAdapter(
-        v8::ExternalResourceVisitor* visitor)
-        : visitor_(visitor) {}
+        Isolate* isolate, v8::ExternalResourceVisitor* visitor)
+        : isolate_(isolate), visitor_(visitor) {}
     virtual void VisitRootPointers(Root root, const char* description,
                                    Object** start, Object** end) {
       for (Object** p = start; p < end; p++) {
         DCHECK((*p)->IsExternalString());
         visitor_->VisitExternalString(
-            Utils::ToLocal(Handle<String>(String::cast(*p))));
+            Utils::ToLocal(Handle<String>(String::cast(*p), isolate_)));
       }
     }
 
    private:
+    Isolate* isolate_;
     v8::ExternalResourceVisitor* visitor_;
-  } external_string_table_visitor(visitor);
+  } external_string_table_visitor(isolate(), visitor);
 
   external_string_table_.IterateAll(&external_string_table_visitor);
 }
@@ -2562,7 +2593,8 @@ void Heap::UnregisterArrayBuffer(JSArrayBuffer* buffer) {
 void Heap::ConfigureInitialOldGenerationSize() {
   if (!old_generation_size_configured_ && tracer()->SurvivalEventsRecorded()) {
     old_generation_allocation_limit_ =
-        Max(MinimumAllocationLimitGrowingStep(),
+        Max(heap_controller()->MinimumAllocationLimitGrowingStep(
+                CurrentHeapGrowingMode()),
             static_cast<size_t>(
                 static_cast<double>(old_generation_allocation_limit_) *
                 (tracer()->AverageSurvivalRatio() / 100)));
@@ -3918,11 +3950,6 @@ void Heap::IterateSmiRoots(RootVisitor* v) {
   v->Synchronize(VisitorSynchronization::kSmiRootList);
 }
 
-void Heap::IterateEncounteredWeakCollections(RootVisitor* visitor) {
-  visitor->VisitRootPointer(Root::kWeakCollections, nullptr,
-                            &encountered_weak_collections_);
-}
-
 // We cannot avoid stale handles to left-trimmed objects, but can only make
 // sure all handles still needed are updated. Filter out a stale pointer
 // and clear the slot to allow post processing of handles (needed because
@@ -4075,11 +4102,9 @@ void Heap::IterateBuiltins(RootVisitor* v) {
 // TODO(1236194): Since the heap size is configurable on the command line
 // and through the API, we should gracefully handle the case that the heap
 // size is not big enough to fit all the initial objects.
-bool Heap::ConfigureHeap(size_t max_semi_space_size_in_kb,
+void Heap::ConfigureHeap(size_t max_semi_space_size_in_kb,
                          size_t max_old_generation_size_in_mb,
                          size_t code_range_size_in_mb) {
-  if (HasBeenSetUp()) return false;
-
   // Overwrite default configuration.
   if (max_semi_space_size_in_kb != 0) {
     max_semi_space_size_ =
@@ -4167,7 +4192,6 @@ bool Heap::ConfigureHeap(size_t max_semi_space_size_in_kb,
   code_range_size_ = code_range_size_in_mb * MB;
 
   configured_ = true;
-  return true;
 }
 
 
@@ -4194,7 +4218,7 @@ void Heap::GetFromRingBuffer(char* buffer) {
   memcpy(buffer + copied, trace_ring_buffer_, ring_buffer_end_);
 }
 
-bool Heap::ConfigureHeapDefault() { return ConfigureHeap(0, 0, 0); }
+void Heap::ConfigureHeapDefault() { ConfigureHeap(0, 0, 0); }
 
 void Heap::RecordStats(HeapStats* stats, bool take_snapshot) {
   *stats->start_marker = HeapStats::kStartMarker;
@@ -4256,176 +4280,6 @@ uint64_t Heap::PromotedExternalMemorySize() {
                                external_memory_at_last_mark_compact_);
 }
 
-
-const double Heap::kMinHeapGrowingFactor = 1.1;
-const double Heap::kMaxHeapGrowingFactor = 4.0;
-const double Heap::kMaxHeapGrowingFactorMemoryConstrained = 2.0;
-const double Heap::kMaxHeapGrowingFactorIdle = 1.5;
-const double Heap::kConservativeHeapGrowingFactor = 1.3;
-const double Heap::kTargetMutatorUtilization = 0.97;
-
-// Given GC speed in bytes per ms, the allocation throughput in bytes per ms
-// (mutator speed), this function returns the heap growing factor that will
-// achieve the kTargetMutatorUtilisation if the GC speed and the mutator speed
-// remain the same until the next GC.
-//
-// For a fixed time-frame T = TM + TG, the mutator utilization is the ratio
-// TM / (TM + TG), where TM is the time spent in the mutator and TG is the
-// time spent in the garbage collector.
-//
-// Let MU be kTargetMutatorUtilisation, the desired mutator utilization for the
-// time-frame from the end of the current GC to the end of the next GC. Based
-// on the MU we can compute the heap growing factor F as
-//
-// F = R * (1 - MU) / (R * (1 - MU) - MU), where R = gc_speed / mutator_speed.
-//
-// This formula can be derived as follows.
-//
-// F = Limit / Live by definition, where the Limit is the allocation limit,
-// and the Live is size of live objects.
-// Let’s assume that we already know the Limit. Then:
-//   TG = Limit / gc_speed
-//   TM = (TM + TG) * MU, by definition of MU.
-//   TM = TG * MU / (1 - MU)
-//   TM = Limit *  MU / (gc_speed * (1 - MU))
-// On the other hand, if the allocation throughput remains constant:
-//   Limit = Live + TM * allocation_throughput = Live + TM * mutator_speed
-// Solving it for TM, we get
-//   TM = (Limit - Live) / mutator_speed
-// Combining the two equation for TM:
-//   (Limit - Live) / mutator_speed = Limit * MU / (gc_speed * (1 - MU))
-//   (Limit - Live) = Limit * MU * mutator_speed / (gc_speed * (1 - MU))
-// substitute R = gc_speed / mutator_speed
-//   (Limit - Live) = Limit * MU  / (R * (1 - MU))
-// substitute F = Limit / Live
-//   F - 1 = F * MU  / (R * (1 - MU))
-//   F - F * MU / (R * (1 - MU)) = 1
-//   F * (1 - MU / (R * (1 - MU))) = 1
-//   F * (R * (1 - MU) - MU) / (R * (1 - MU)) = 1
-//   F = R * (1 - MU) / (R * (1 - MU) - MU)
-double Heap::HeapGrowingFactor(double gc_speed, double mutator_speed,
-                               double max_factor) {
-  DCHECK_LE(kMinHeapGrowingFactor, max_factor);
-  DCHECK_GE(kMaxHeapGrowingFactor, max_factor);
-  if (gc_speed == 0 || mutator_speed == 0) return max_factor;
-
-  const double speed_ratio = gc_speed / mutator_speed;
-  const double mu = kTargetMutatorUtilization;
-
-  const double a = speed_ratio * (1 - mu);
-  const double b = speed_ratio * (1 - mu) - mu;
-
-  // The factor is a / b, but we need to check for small b first.
-  double factor = (a < b * max_factor) ? a / b : max_factor;
-  factor = Min(factor, max_factor);
-  factor = Max(factor, kMinHeapGrowingFactor);
-  return factor;
-}
-
-double Heap::MaxHeapGrowingFactor(size_t max_old_generation_size) {
-  const double min_small_factor = 1.3;
-  const double max_small_factor = 2.0;
-  const double high_factor = 4.0;
-
-  size_t max_old_generation_size_in_mb = max_old_generation_size / MB;
-  max_old_generation_size_in_mb =
-      Max(max_old_generation_size_in_mb,
-          static_cast<size_t>(kMinOldGenerationSize));
-
-  // If we are on a device with lots of memory, we allow a high heap
-  // growing factor.
-  if (max_old_generation_size_in_mb >= kMaxOldGenerationSize) {
-    return high_factor;
-  }
-
-  DCHECK_GE(max_old_generation_size_in_mb, kMinOldGenerationSize);
-  DCHECK_LT(max_old_generation_size_in_mb, kMaxOldGenerationSize);
-
-  // On smaller devices we linearly scale the factor: (X-A)/(B-A)*(D-C)+C
-  double factor = (max_old_generation_size_in_mb - kMinOldGenerationSize) *
-                      (max_small_factor - min_small_factor) /
-                      (kMaxOldGenerationSize - kMinOldGenerationSize) +
-                  min_small_factor;
-  return factor;
-}
-
-size_t Heap::CalculateOldGenerationAllocationLimit(double factor,
-                                                   size_t old_gen_size) {
-  CHECK_LT(1.0, factor);
-  CHECK_LT(0, old_gen_size);
-  uint64_t limit = static_cast<uint64_t>(old_gen_size * factor);
-  limit = Max(limit, static_cast<uint64_t>(old_gen_size) +
-                         MinimumAllocationLimitGrowingStep());
-  limit += new_space_->Capacity();
-  uint64_t halfway_to_the_max =
-      (static_cast<uint64_t>(old_gen_size) + max_old_generation_size_) / 2;
-  return static_cast<size_t>(Min(limit, halfway_to_the_max));
-}
-
-size_t Heap::MinimumAllocationLimitGrowingStep() {
-  const size_t kRegularAllocationLimitGrowingStep = 8;
-  const size_t kLowMemoryAllocationLimitGrowingStep = 2;
-  size_t limit = (Page::kPageSize > MB ? Page::kPageSize : MB);
-  return limit * (ShouldOptimizeForMemoryUsage()
-                      ? kLowMemoryAllocationLimitGrowingStep
-                      : kRegularAllocationLimitGrowingStep);
-}
-
-void Heap::SetOldGenerationAllocationLimit(size_t old_gen_size, double gc_speed,
-                                           double mutator_speed) {
-  double max_factor = MaxHeapGrowingFactor(max_old_generation_size_);
-  double factor = HeapGrowingFactor(gc_speed, mutator_speed, max_factor);
-
-  if (FLAG_trace_gc_verbose) {
-    isolate_->PrintWithTimestamp(
-        "Heap growing factor %.1f based on mu=%.3f, speed_ratio=%.f "
-        "(gc=%.f, mutator=%.f)\n",
-        factor, kTargetMutatorUtilization, gc_speed / mutator_speed, gc_speed,
-        mutator_speed);
-  }
-
-  if (memory_reducer_->ShouldGrowHeapSlowly() ||
-      ShouldOptimizeForMemoryUsage()) {
-    factor = Min(factor, kConservativeHeapGrowingFactor);
-  }
-
-  if (FLAG_stress_compaction || ShouldReduceMemory()) {
-    factor = kMinHeapGrowingFactor;
-  }
-
-  if (FLAG_heap_growing_percent > 0) {
-    factor = 1.0 + FLAG_heap_growing_percent / 100.0;
-  }
-
-  old_generation_allocation_limit_ =
-      CalculateOldGenerationAllocationLimit(factor, old_gen_size);
-
-  if (FLAG_trace_gc_verbose) {
-    isolate_->PrintWithTimestamp(
-        "Grow: old size: %" PRIuS " KB, new limit: %" PRIuS " KB (%.1f)\n",
-        old_gen_size / KB, old_generation_allocation_limit_ / KB, factor);
-  }
-}
-
-void Heap::DampenOldGenerationAllocationLimit(size_t old_gen_size,
-                                              double gc_speed,
-                                              double mutator_speed) {
-  double max_factor = MaxHeapGrowingFactor(max_old_generation_size_);
-  double factor = HeapGrowingFactor(gc_speed, mutator_speed, max_factor);
-  size_t limit = CalculateOldGenerationAllocationLimit(factor, old_gen_size);
-  if (limit < old_generation_allocation_limit_) {
-    if (FLAG_trace_gc_verbose) {
-      isolate_->PrintWithTimestamp(
-          "Dampen: old size: %" PRIuS " KB, old limit: %" PRIuS
-          " KB, "
-          "new limit: %" PRIuS " KB (%.1f)\n",
-          old_gen_size / KB, old_generation_allocation_limit_ / KB, limit / KB,
-          factor);
-    }
-    old_generation_allocation_limit_ = limit;
-  }
-}
-
 bool Heap::ShouldOptimizeForLoadTime() {
   return isolate()->rail_mode() == PERFORMANCE_LOAD &&
          !AllocationLimitOvershotByLargeMargin() &&
@@ -4456,6 +4310,17 @@ bool Heap::ShouldExpandOldGenerationOnSlowAllocation() {
     return false;
   }
   return true;
+}
+
+Heap::HeapGrowingMode Heap::CurrentHeapGrowingMode() {
+  if (ShouldReduceMemory()) return HeapGrowingMode::kMinimal;
+
+  if (memory_reducer()->ShouldGrowHeapSlowly() ||
+      ShouldOptimizeForMemoryUsage()) {
+    return HeapGrowingMode::kConservative;
+  }
+
+  return HeapGrowingMode::kDefault;
 }
 
 // This function returns either kNoLimit, kSoftLimit, or kHardLimit.
@@ -4660,32 +4525,30 @@ HeapObject* Heap::AllocateRawCodeInLargeObjectSpace(int size) {
   return nullptr;
 }
 
-bool Heap::SetUp() {
+void Heap::SetUp() {
 #ifdef V8_ENABLE_ALLOCATION_TIMEOUT
   allocation_timeout_ = NextAllocationTimeout();
 #endif
 
-  // Initialize heap spaces and initial maps and objects. Whenever something
-  // goes wrong, just return false. The caller should check the results and
-  // call Heap::TearDown() to release allocated memory.
+  // Initialize heap spaces and initial maps and objects.
   //
   // If the heap is not yet configured (e.g. through the API), configure it.
   // Configuration is based on the flags new-space-size (really the semispace
   // size) and old-space-size if set or the initial values of semispace_size_
   // and old_generation_size_ otherwise.
-  if (!configured_) {
-    if (!ConfigureHeapDefault()) return false;
-  }
+  if (!configured_) ConfigureHeapDefault();
 
   mmap_region_base_ =
       reinterpret_cast<uintptr_t>(v8::internal::GetRandomMmapAddr()) &
       ~kMmapRegionMask;
 
   // Set up memory allocator.
-  memory_allocator_ = new MemoryAllocator(isolate_);
-  if (!memory_allocator_->SetUp(MaxReserved(), code_range_size_)) return false;
+  memory_allocator_ =
+      new MemoryAllocator(isolate_, MaxReserved(), code_range_size_);
 
   store_buffer_ = new StoreBuffer(this);
+
+  heap_controller_ = new HeapController(this);
 
   mark_compact_collector_ = new MarkCompactCollector(this);
   incremental_marking_ =
@@ -4703,33 +4566,17 @@ bool Heap::SetUp() {
         new ConcurrentMarking(this, nullptr, nullptr, nullptr, nullptr);
   }
 
-  for (int i = 0; i <= LAST_SPACE; i++) {
+  for (int i = FIRST_SPACE; i <= LAST_SPACE; i++) {
     space_[i] = nullptr;
   }
 
-  space_[NEW_SPACE] = new_space_ = new NewSpace(this);
-  if (!new_space_->SetUp(initial_semispace_size_, max_semi_space_size_)) {
-    return false;
-  }
-
+  space_[RO_SPACE] = read_only_space_ = new ReadOnlySpace(this);
+  space_[NEW_SPACE] = new_space_ =
+      new NewSpace(this, initial_semispace_size_, max_semi_space_size_);
   space_[OLD_SPACE] = old_space_ = new OldSpace(this);
-  if (!old_space_->SetUp()) return false;
-
   space_[CODE_SPACE] = code_space_ = new CodeSpace(this);
-  if (!code_space_->SetUp()) return false;
-
-  space_[MAP_SPACE] = map_space_ = new MapSpace(this, MAP_SPACE);
-  if (!map_space_->SetUp()) return false;
-
-  // The large object code space may contain code or data.  We set the memory
-  // to be non-executable here for safety, but this means we need to enable it
-  // explicitly when allocating large code objects.
-  space_[LO_SPACE] = lo_space_ = new LargeObjectSpace(this, LO_SPACE);
-  if (!lo_space_->SetUp()) return false;
-
-  space_[RO_SPACE] = read_only_space_ =
-      new ReadOnlySpace(this, RO_SPACE, NOT_EXECUTABLE);
-  if (!read_only_space_->SetUp()) return false;
+  space_[MAP_SPACE] = map_space_ = new MapSpace(this);
+  space_[LO_SPACE] = lo_space_ = new LargeObjectSpace(this);
 
   // Set up the seed that is used to randomize the string hash function.
   DCHECK_EQ(Smi::kZero, hash_seed());
@@ -4789,8 +4636,6 @@ bool Heap::SetUp() {
   write_protect_code_memory_ = FLAG_write_protect_code_memory;
 
   external_reference_table_.Init(isolate_);
-
-  return true;
 }
 
 void Heap::InitializeHashSeed() {
@@ -4943,6 +4788,11 @@ void Heap::TearDown() {
     stress_scavenge_observer_ = nullptr;
   }
 
+  if (heap_controller_ != nullptr) {
+    delete heap_controller_;
+    heap_controller_ = nullptr;
+  }
+
   if (mark_compact_collector_ != nullptr) {
     mark_compact_collector_->TearDown();
     delete mark_compact_collector_;
@@ -5005,34 +4855,9 @@ void Heap::TearDown() {
   delete tracer_;
   tracer_ = nullptr;
 
-  new_space_->TearDown();
-  delete new_space_;
-  new_space_ = nullptr;
-
-  if (old_space_ != nullptr) {
-    delete old_space_;
-    old_space_ = nullptr;
-  }
-
-  if (code_space_ != nullptr) {
-    delete code_space_;
-    code_space_ = nullptr;
-  }
-
-  if (map_space_ != nullptr) {
-    delete map_space_;
-    map_space_ = nullptr;
-  }
-
-  if (lo_space_ != nullptr) {
-    lo_space_->TearDown();
-    delete lo_space_;
-    lo_space_ = nullptr;
-  }
-
-  if (read_only_space_ != nullptr) {
-    delete read_only_space_;
-    read_only_space_ = nullptr;
+  for (int i = FIRST_SPACE; i <= LAST_SPACE; i++) {
+    delete space_[i];
+    space_[i] = nullptr;
   }
 
   store_buffer()->TearDown();
@@ -5812,7 +5637,7 @@ Code* GcSafeCastToCode(Heap* heap, HeapObject* object, Address inner_pointer) {
 
 bool Heap::GcSafeCodeContains(HeapObject* code, Address addr) {
   Map* map = GcSafeMapOfCodeSpaceObject(code);
-  DCHECK(map == code->GetHeap()->code_map());
+  DCHECK(map == code_map());
 #ifdef V8_EMBEDDED_BUILTINS
   if (InstructionStream::TryLookupCode(isolate(), addr) == code) return true;
 #endif

@@ -204,11 +204,7 @@ TF_BUILTIN(DebugBreakTrampoline, CodeStubAssembler) {
   BIND(&tailcall_to_shared);
   // Tail call into code object on the SharedFunctionInfo.
   TNode<Code> code = GetSharedFunctionInfoCode(shared);
-  // Use the ConstructTrampolineDescriptor because it passes new.target too in
-  // case this is called during construct.
-  CSA_ASSERT(this, IsCode(code));
-  ConstructTrampolineDescriptor descriptor(isolate());
-  TailCallStub(descriptor, code, context, function, new_target, arg_count);
+  TailCallJSCode(code, context, function, new_target, arg_count);
 }
 
 class RecordWriteCodeStubAssembler : public CodeStubAssembler {
@@ -1090,6 +1086,23 @@ TF_BUILTIN(RunMicrotasks, InternalBuiltinsAssembler) {
       Branch(IntPtrLessThan(index.value(), num_tasks), &loop, &init_queue_loop);
     }
   }
+}
+
+TF_BUILTIN(AllocateInNewSpace, CodeStubAssembler) {
+  TNode<Int32T> requested_size =
+      UncheckedCast<Int32T>(Parameter(Descriptor::kRequestedSize));
+
+  TailCallRuntime(Runtime::kAllocateInNewSpace, NoContextConstant(),
+                  SmiFromInt32(requested_size));
+}
+
+TF_BUILTIN(AllocateInOldSpace, CodeStubAssembler) {
+  TNode<Int32T> requested_size =
+      UncheckedCast<Int32T>(Parameter(Descriptor::kRequestedSize));
+
+  int flags = AllocateTargetSpace::encode(OLD_SPACE);
+  TailCallRuntime(Runtime::kAllocateInTargetSpace, NoContextConstant(),
+                  SmiFromInt32(requested_size), SmiConstant(flags));
 }
 
 TF_BUILTIN(AbortJS, CodeStubAssembler) {

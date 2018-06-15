@@ -3318,6 +3318,12 @@ Node* WasmGraphBuilder::BuildAsmjsLoadMem(MachineType type, Node* index) {
 
 Node* WasmGraphBuilder::Uint32ToUintptr(Node* node) {
   if (mcgraph()->machine()->Is32()) return node;
+  // Fold instances of ChangeUint32ToUint64(IntConstant) directly.
+  UintPtrMatcher matcher(node);
+  if (matcher.HasValue()) {
+    uintptr_t value = matcher.Value();
+    return mcgraph()->IntPtrConstant(bit_cast<intptr_t>(value));
+  }
   return graph()->NewNode(mcgraph()->machine()->ChangeUint32ToUint64(), node);
 }
 
@@ -4009,32 +4015,25 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
   Node* BuildAllocateHeapNumberWithValue(Node* value, Node* control) {
     MachineOperatorBuilder* machine = mcgraph()->machine();
     CommonOperatorBuilder* common = mcgraph()->common();
-    // The AllocateHeapNumber builtin does not use the js_context, so we can
-    // safely pass in Smi zero here.
     Callable callable =
         Builtins::CallableFor(isolate_, Builtins::kAllocateHeapNumber);
     Node* target = jsgraph()->HeapConstant(callable.code());
-    Node* js_context = jsgraph()->NoContextConstant();
-    Node* begin_region = graph()->NewNode(
-        common->BeginRegion(RegionObservability::kNotObservable), *effect_);
     if (!allocate_heap_number_operator_.is_set()) {
       auto call_descriptor = Linkage::GetStubCallDescriptor(
           isolate_, mcgraph()->zone(), callable.descriptor(), 0,
-          CallDescriptor::kNoFlags, Operator::kNoThrow);
+          CallDescriptor::kNoFlags, Operator::kNoThrow,
+          MachineType::AnyTagged(), 1, Linkage::kNoContext);
       allocate_heap_number_operator_.set(common->Call(call_descriptor));
     }
-    Node* heap_number =
-        graph()->NewNode(allocate_heap_number_operator_.get(), target,
-                         js_context, begin_region, control);
+    Node* heap_number = graph()->NewNode(allocate_heap_number_operator_.get(),
+                                         target, *effect_, control);
     Node* store =
         graph()->NewNode(machine->Store(StoreRepresentation(
                              MachineRepresentation::kFloat64, kNoWriteBarrier)),
                          heap_number, BuildHeapNumberValueIndexConstant(),
                          value, heap_number, control);
-    Node* finish_region =
-        graph()->NewNode(common->FinishRegion(), heap_number, store);
-    *effect_ = finish_region;
-    return finish_region;
+    *effect_ = store;
+    return heap_number;
   }
 
   Node* BuildChangeSmiToFloat64(Node* value) {
@@ -4273,7 +4272,6 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     Node* num = BuildJavaScriptToNumber(node, js_context);
 
     // Change representation.
-    SimplifiedOperatorBuilder simplified(mcgraph()->zone());
     num = BuildChangeTaggedToFloat64(num);
 
     switch (type) {
@@ -4481,9 +4479,9 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
           call = graph()->NewNode(mcgraph()->common()->Call(call_descriptor),
                                   pos, args);
         } else if (function->shared()->internal_formal_parameter_count() >= 0) {
-          Callable callable = CodeFactory::ArgumentAdaptor(isolate_);
           int pos = 0;
-          args[pos++] = jsgraph()->HeapConstant(callable.code());
+          args[pos++] = mcgraph()->RelocatableIntPtrConstant(
+              wasm::WasmCode::kWasmArgumentsAdaptor, RelocInfo::WASM_STUB_CALL);
           args[pos++] = callable_node;   // target callable
           args[pos++] = undefined_node;  // new target
           args[pos++] = mcgraph()->Int32Constant(wasm_count);  // argument count
@@ -4499,16 +4497,19 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
             args[pos++] = undefined_node;
           }
 
+          call_descriptor = Linkage::GetStubCallDescriptor(
+              isolate_, mcgraph()->zone(), ArgumentAdaptorDescriptor(isolate_),
+              1 + wasm_count, CallDescriptor::kNoFlags, Operator::kNoProperties,
+              MachineType::AnyTagged(), 1, Linkage::kPassContext,
+              StubCallMode::kCallWasmRuntimeStub);
+
           // Convert wasm numbers to JS values.
           pos = AddArgumentNodes(args, pos, wasm_count, sig_);
           args[pos++] = function_context;
           args[pos++] = *effect_;
           args[pos++] = *control_;
-          call = graph()->NewNode(
-              mcgraph()->common()->Call(Linkage::GetStubCallDescriptor(
-                  isolate_, mcgraph()->zone(), callable.descriptor(),
-                  1 + wasm_count, CallDescriptor::kNoFlags)),
-              pos, args);
+          call = graph()->NewNode(mcgraph()->common()->Call(call_descriptor),
+                                  pos, args);
         }
       }
     }
@@ -4516,16 +4517,17 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     // We cannot call the target directly, we have to use the Call builtin.
     if (!call) {
       int pos = 0;
-      // We cannot call the target directly, we have to use the Call builtin.
-      Callable callable = CodeFactory::Call(isolate_);
-      args[pos++] = jsgraph()->HeapConstant(callable.code());
+      args[pos++] = mcgraph()->RelocatableIntPtrConstant(
+          wasm::WasmCode::kWasmCallJavaScript, RelocInfo::WASM_STUB_CALL);
       args[pos++] = callable_node;
       args[pos++] = mcgraph()->Int32Constant(wasm_count);  // argument count
       args[pos++] = undefined_node;                        // receiver
 
       call_descriptor = Linkage::GetStubCallDescriptor(
-          isolate_, graph()->zone(), callable.descriptor(), wasm_count + 1,
-          CallDescriptor::kNoFlags);
+          isolate_, graph()->zone(), CallTrampolineDescriptor(isolate_),
+          wasm_count + 1, CallDescriptor::kNoFlags, Operator::kNoProperties,
+          MachineType::AnyTagged(), 1, Linkage::kPassContext,
+          StubCallMode::kCallWasmRuntimeStub);
 
       // Convert wasm numbers to JS values.
       pos = AddArgumentNodes(args, pos, wasm_count, sig_);
@@ -4750,9 +4752,8 @@ Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
   OptimizedCompilationInfo info(func_name, &zone, Code::JS_TO_WASM_FUNCTION);
 
   if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
-    OFStream os(stdout);
-    os << "-- Graph after change lowering -- " << std::endl;
-    os << AsRPO(graph);
+    StdoutStream{} << "-- Graph after change lowering -- " << std::endl
+                   << AsRPO(graph);
   }
 
   // Schedule and compile to machine code.
@@ -4778,35 +4779,6 @@ Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
 
   return code;
 }
-
-namespace {
-
-void ValidateImportWrapperReferencesImmovables(Handle<Code> wrapper) {
-#ifdef DEBUG
-  // We expect the only embedded objects to be those originating from
-  // a snapshot, which are immovable.
-  DisallowHeapAllocation no_gc;
-  if (wrapper.is_null()) return;
-  static constexpr int kAllGCRefs = (1 << (RelocInfo::LAST_GCED_ENUM + 1)) - 1;
-  for (RelocIterator it(*wrapper, kAllGCRefs); !it.done(); it.next()) {
-    RelocInfo::Mode mode = it.rinfo()->rmode();
-    Object* target = nullptr;
-    switch (mode) {
-      case RelocInfo::CODE_TARGET:
-        // this would be either one of the stubs or builtins, because
-        // we didn't link yet.
-        target = Code::GetCodeFromTargetAddress(it.rinfo()->target_address());
-        break;
-      default:
-        UNREACHABLE();
-    }
-    DCHECK_NOT_NULL(target);
-    DCHECK(target->IsSmi() || Heap::IsImmovable(HeapObject::cast(target)));
-  }
-#endif
-}
-
-}  // namespace
 
 Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
                                     wasm::FunctionSig* sig, uint32_t index,
@@ -4851,9 +4823,8 @@ Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
   OptimizedCompilationInfo info(func_name, &zone, Code::WASM_TO_JS_FUNCTION);
 
   if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
-    OFStream os(stdout);
-    os << "-- Graph after change lowering -- " << std::endl;
-    os << AsRPO(graph);
+    StdoutStream{} << "-- Graph after change lowering -- " << std::endl
+                   << AsRPO(graph);
   }
 
   // Schedule and compile to machine code.
@@ -4864,8 +4835,6 @@ Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
 
   Handle<Code> code = Pipeline::GenerateCodeForTesting(
       &info, isolate, incoming, &graph, nullptr, source_position_table);
-  ValidateImportWrapperReferencesImmovables(code);
-
 #ifdef ENABLE_DISASSEMBLER
   if (FLAG_print_opt_code && !code.is_null()) {
     CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
@@ -4923,9 +4892,8 @@ Handle<Code> CompileWasmInterpreterEntry(Isolate* isolate, uint32_t func_index,
                                   Code::WASM_INTERPRETER_ENTRY);
 
     if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
-      OFStream os(stdout);
-      os << "-- Wasm interpreter entry graph -- " << std::endl;
-      os << AsRPO(graph);
+      StdoutStream{} << "-- Wasm interpreter entry graph -- " << std::endl
+                     << AsRPO(graph);
     }
 
     code = Pipeline::GenerateCodeForTesting(&info, isolate, incoming, &graph,
@@ -4990,9 +4958,7 @@ Handle<Code> CompileCWasmEntry(Isolate* isolate, wasm::FunctionSig* sig) {
   OptimizedCompilationInfo info(debug_name_vec, &zone, Code::C_WASM_ENTRY);
 
   if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
-    OFStream os(stdout);
-    os << "-- C Wasm entry graph -- " << std::endl;
-    os << AsRPO(graph);
+    StdoutStream{} << "-- C Wasm entry graph -- " << std::endl << AsRPO(graph);
   }
 
   Handle<Code> code =
@@ -5045,9 +5011,8 @@ SourcePositionTable* TurbofanWasmCompilationUnit::BuildGraphForWasmFunction(
                          wasm_unit_->func_body_, node_origins);
   if (graph_construction_result_.failed()) {
     if (FLAG_trace_wasm_compiler) {
-      OFStream os(stdout);
-      os << "Compilation failed: " << graph_construction_result_.error_msg()
-         << std::endl;
+      StdoutStream{} << "Compilation failed: "
+                     << graph_construction_result_.error_msg() << std::endl;
     }
     return nullptr;
   }

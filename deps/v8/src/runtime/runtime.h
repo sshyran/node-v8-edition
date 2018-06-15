@@ -291,9 +291,9 @@ namespace internal {
   F(LiveEditCheckAndDropActivations, 3, 1)          \
   F(LiveEditCompareStrings, 2, 1)                   \
   F(LiveEditFindSharedFunctionInfosForScript, 1, 1) \
-  F(LiveEditResizeScriptFunctionArray, 2, 1)        \
-  F(LiveEditFunctionSetScript, 3, 1)                \
-  F(LiveEditFunctionSourceUpdated, 3, 1)            \
+  F(LiveEditFixupScript, 2, 1)                      \
+  F(LiveEditFunctionSetScript, 2, 1)                \
+  F(LiveEditFunctionSourceUpdated, 2, 1)            \
   F(LiveEditGatherCompileInfo, 2, 1)                \
   F(LiveEditPatchFunctionPositions, 2, 1)           \
   F(LiveEditReplaceFunctionCode, 2, 1)              \
@@ -556,7 +556,8 @@ namespace internal {
   F(ValidateWasmInstancesChain, 2, 1)         \
   F(ValidateWasmModuleState, 1, 1)            \
   F(WasmNumInterpretedCalls, 1, 1)            \
-  F(WasmTraceMemory, 1, 1)
+  F(WasmTraceMemory, 1, 1)                    \
+  F(WasmMemoryHasFullGuardRegion, 1, 1)
 
 #define FOR_EACH_INTRINSIC_TYPEDARRAY(F) \
   F(ArrayBufferNeuter, 1, 1)             \
@@ -569,8 +570,6 @@ namespace internal {
   F(TypedArraySortFast, 1, 1)
 
 #define FOR_EACH_INTRINSIC_DATAVIEW(F) \
-  F(DataViewGetFloat32, 2, 1)          \
-  F(DataViewGetFloat64, 2, 1)          \
   F(DataViewGetBigInt64, 2, 1)         \
   F(DataViewGetBigUint64, 2, 1)        \
   F(DataViewSetInt8, 2, 1)             \

@@ -620,9 +620,10 @@ Handle<JSFunction> Genesis::CreateEmptyFunction() {
   empty_function->shared()->set_raw_start_position(0);
   empty_function->shared()->set_raw_end_position(source->length());
   empty_function->shared()->set_scope_info(*scope_info);
+  empty_function->shared()->set_function_literal_id(1);
   empty_function->shared()->DontAdaptArguments();
   SharedFunctionInfo::SetScript(handle(empty_function->shared(), isolate()),
-                                script, 1);
+                                script);
 
   return empty_function;
 }
@@ -3110,7 +3111,7 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
         Builtins::kDataViewConstructor);
     InstallWithIntrinsicDefaultProto(isolate_, data_view_fun,
                                      Context::DATA_VIEW_FUN_INDEX);
-    data_view_fun->shared()->set_length(3);
+    data_view_fun->shared()->set_length(1);
     data_view_fun->shared()->DontAdaptArguments();
 
     // Setup %DataViewPrototype%.
@@ -4377,6 +4378,18 @@ void Genesis::InitializeGlobal_harmony_array_flat() {
                         Builtins::kArrayPrototypeFlat, 0, false, DONT_ENUM);
   SimpleInstallFunction(isolate(), array_prototype, "flatMap",
                         Builtins::kArrayPrototypeFlatMap, 1, false, DONT_ENUM);
+}
+
+void Genesis::InitializeGlobal_harmony_symbol_description() {
+  if (!FLAG_harmony_symbol_description) return;
+
+  // Symbol.prototype.description
+  Handle<JSFunction> symbol_fun(native_context()->symbol_function());
+  Handle<JSObject> symbol_prototype(
+      JSObject::cast(symbol_fun->instance_prototype()));
+  SimpleInstallGetter(isolate(), symbol_prototype,
+                      factory()->InternalizeUtf8String("description"),
+                      Builtins::kSymbolPrototypeDescriptionGetter, true);
 }
 
 void Genesis::InitializeGlobal_harmony_string_matchall() {

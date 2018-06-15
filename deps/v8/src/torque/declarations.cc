@@ -9,13 +9,15 @@ namespace v8 {
 namespace internal {
 namespace torque {
 
-Scope* Declarations::GetNodeScope(const AstNode* node) {
+Scope* Declarations::GetNodeScope(const AstNode* node, bool reset_scope) {
   std::pair<const AstNode*, TypeVector> key(
       node, current_generic_specialization_ == nullptr
                 ? TypeVector()
                 : current_generic_specialization_->second);
-  auto i = scopes_.find(key);
-  if (i != scopes_.end()) return i->second;
+  if (!reset_scope) {
+    auto i = scopes_.find(key);
+    if (i != scopes_.end()) return i->second;
+  }
   Scope* result = chain_.NewScope();
   scopes_[key] = result;
   return result;
@@ -143,9 +145,9 @@ Label* Declarations::LookupLabel(const std::string& name) {
   return Label::cast(d);
 }
 
-Macro* Declarations::LookupMacro(const std::string& name,
-                                 const TypeVector& types) {
-  Declarable* declarable = Lookup(name);
+Macro* Declarations::TryLookupMacro(const std::string& name,
+                                    const TypeVector& types) {
+  Declarable* declarable = TryLookup(name);
   if (declarable != nullptr) {
     if (declarable->IsMacroList()) {
       for (auto& m : MacroList::cast(declarable)->list()) {
@@ -156,6 +158,13 @@ Macro* Declarations::LookupMacro(const std::string& name,
       }
     }
   }
+  return nullptr;
+}
+
+Macro* Declarations::LookupMacro(const std::string& name,
+                                 const TypeVector& types) {
+  Macro* result = TryLookupMacro(name, types);
+  if (result != nullptr) return result;
   std::stringstream stream;
   stream << "macro " << name << " with parameter types " << types
          << " is not defined";
@@ -175,11 +184,11 @@ Builtin* Declarations::LookupBuiltin(const std::string& name) {
   return nullptr;
 }
 
-Generic* Declarations::LookupGeneric(const std::string& name) {
-  Declarable* declarable = Lookup(name);
-  if (declarable != nullptr) {
-    if (declarable->IsGeneric()) {
-      return Generic::cast(declarable);
+GenericList* Declarations::LookupGeneric(const std::string& name) {
+  Declarable* declarable_list = Lookup(name);
+  if (declarable_list != nullptr) {
+    if (declarable_list->IsGenericList()) {
+      return GenericList::cast(declarable_list);
     }
     ReportError(name + " is not a generic");
   }
@@ -225,8 +234,8 @@ Label* Declarations::DeclareLabel(const std::string& name) {
   return result;
 }
 
-Macro* Declarations::DeclareMacro(const std::string& name,
-                                  const Signature& signature) {
+MacroList* Declarations::GetMacroListForName(const std::string& name,
+                                             const Signature& signature) {
   auto previous = chain_.Lookup(name);
   MacroList* macro_list = nullptr;
   if (previous == nullptr) {
@@ -251,8 +260,17 @@ Macro* Declarations::DeclareMacro(const std::string& name,
       ReportError(s.str());
     }
   }
-  return macro_list->AddMacro(
-      RegisterDeclarable(std::unique_ptr<Macro>(new Macro(name, signature))));
+  return macro_list;
+}
+
+Macro* Declarations::DeclareMacro(const std::string& name,
+                                  const Signature& signature,
+                                  base::Optional<std::string> op) {
+  Macro* macro =
+      RegisterDeclarable(std::unique_ptr<Macro>(new Macro(name, signature)));
+  GetMacroListForName(name, signature)->AddMacro(macro);
+  if (op) GetMacroListForName(*op, signature)->AddMacro(macro);
+  return macro;
 }
 
 Builtin* Declarations::DeclareBuiltin(const std::string& name,
@@ -308,9 +326,21 @@ void Declarations::DeclareConstant(const std::string& name, const Type* type,
 
 Generic* Declarations::DeclareGeneric(const std::string& name, Module* module,
                                       GenericDeclaration* generic) {
-  CheckAlreadyDeclared(name, "generic");
-  Generic* result = new Generic(name, module, generic);
-  Declare(name, std::unique_ptr<Generic>(result));
+  auto previous = chain_.Lookup(name);
+  GenericList* generic_list = nullptr;
+  if (previous == nullptr) {
+    generic_list = new GenericList();
+    Declare(name, std::unique_ptr<Declarable>(generic_list));
+  } else if (!previous->IsGenericList()) {
+    std::stringstream s;
+    s << "cannot redeclare non-generic " << name << " as a generic";
+    ReportError(s.str());
+  } else {
+    generic_list = GenericList::cast(previous);
+  }
+  Generic* result = RegisterDeclarable(
+      std::unique_ptr<Generic>(new Generic(name, module, generic)));
+  generic_list->AddGeneric(result);
   generic_declaration_scopes_[result] = GetScopeChainSnapshot();
   return result;
 }
@@ -319,6 +349,16 @@ TypeVector Declarations::GetCurrentSpecializationTypeNamesVector() {
   TypeVector result;
   if (current_generic_specialization_ != nullptr) {
     result = current_generic_specialization_->second;
+  }
+  return result;
+}
+
+std::string GetGeneratedCallableName(const std::string& name,
+                                     const TypeVector& specialized_types) {
+  std::string result = name;
+  for (auto type : specialized_types) {
+    std::string type_string = type->MangledName();
+    result += std::to_string(type_string.size()) + type_string;
   }
   return result;
 }

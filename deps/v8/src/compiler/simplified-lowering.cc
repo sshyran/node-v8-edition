@@ -286,8 +286,8 @@ class RepresentationSelector {
     bool weakened_ = false;
   };
 
-  RepresentationSelector(JSGraph* jsgraph, Zone* zone,
-                         RepresentationChanger* changer,
+  RepresentationSelector(JSGraph* jsgraph, const JSHeapBroker* js_heap_broker,
+                         Zone* zone, RepresentationChanger* changer,
                          SourcePositionTable* source_positions,
                          NodeOriginTable* node_origins)
       : jsgraph_(jsgraph),
@@ -306,7 +306,7 @@ class RepresentationSelector {
         source_positions_(source_positions),
         node_origins_(node_origins),
         type_cache_(TypeCache::Get()),
-        op_typer_(jsgraph->isolate(), graph_zone()) {
+        op_typer_(jsgraph->isolate(), js_heap_broker, graph_zone()) {
   }
 
   // Forward propagation of types from type feedback.
@@ -537,7 +537,7 @@ class RepresentationSelector {
   }
 
   void PrintNodeFeedbackType(Node* n) {
-    OFStream os(stdout);
+    StdoutStream os;
     os << "#" << n->id() << ":" << *n->op() << "(";
     int j = 0;
     for (Node* const i : n->inputs()) {
@@ -3188,29 +3188,26 @@ class RepresentationSelector {
 
   void PrintOutputInfo(NodeInfo* info) {
     if (FLAG_trace_representation) {
-      OFStream os(stdout);
-      os << info->representation();
+      StdoutStream{} << info->representation();
     }
   }
 
   void PrintRepresentation(MachineRepresentation rep) {
     if (FLAG_trace_representation) {
-      OFStream os(stdout);
-      os << rep;
+      StdoutStream{} << rep;
     }
   }
 
   void PrintTruncation(Truncation truncation) {
     if (FLAG_trace_representation) {
-      OFStream os(stdout);
-      os << truncation.description() << std::endl;
+      StdoutStream{} << truncation.description() << std::endl;
     }
   }
 
   void PrintUseInfo(UseInfo info) {
     if (FLAG_trace_representation) {
-      OFStream os(stdout);
-      os << info.representation() << ":" << info.truncation().description();
+      StdoutStream{} << info.representation() << ":"
+                     << info.truncation().description();
     }
   }
 
@@ -3252,11 +3249,14 @@ class RepresentationSelector {
   Zone* graph_zone() { return jsgraph_->zone(); }
 };
 
-SimplifiedLowering::SimplifiedLowering(JSGraph* jsgraph, Zone* zone,
+SimplifiedLowering::SimplifiedLowering(JSGraph* jsgraph,
+                                       const JSHeapBroker* js_heap_broker,
+                                       Zone* zone,
                                        SourcePositionTable* source_positions,
                                        NodeOriginTable* node_origins,
                                        PoisoningMitigationLevel poisoning_level)
     : jsgraph_(jsgraph),
+      js_heap_broker_(js_heap_broker),
       zone_(zone),
       type_cache_(TypeCache::Get()),
       source_positions_(source_positions),
@@ -3265,8 +3265,8 @@ SimplifiedLowering::SimplifiedLowering(JSGraph* jsgraph, Zone* zone,
 
 void SimplifiedLowering::LowerAllNodes() {
   RepresentationChanger changer(jsgraph(), jsgraph()->isolate());
-  RepresentationSelector selector(jsgraph(), zone_, &changer, source_positions_,
-                                  node_origins_);
+  RepresentationSelector selector(jsgraph(), js_heap_broker_, zone_, &changer,
+                                  source_positions_, node_origins_);
   selector.Run(this);
 }
 

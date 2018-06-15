@@ -17,7 +17,6 @@
 #include "src/wasm/module-compiler.h"
 
 namespace v8 {
-class Isolate;
 namespace internal {
 
 struct CodeDesc;
@@ -34,49 +33,51 @@ struct WasmModule;
 // elements of the list coincide with {compiler::TrapId}, order matters.
 #define WASM_RUNTIME_STUB_LIST(V, VTRAP) \
   FOREACH_WASM_TRAPREASON(VTRAP)         \
-  V(WasmStackGuard)
+  V(WasmArgumentsAdaptor)                \
+  V(WasmCallJavaScript)                  \
+  V(WasmStackGuard)                      \
+  V(DoubleToI)
+
+struct AddressRange {
+  Address start;
+  Address end;
+
+  AddressRange(Address s, Address e) : start(s), end(e) {
+    DCHECK_LE(start, end);
+    DCHECK_IMPLIES(start == kNullAddress, end == kNullAddress);
+  }
+  AddressRange() : AddressRange(kNullAddress, kNullAddress) {}
+
+  size_t size() const { return static_cast<size_t>(end - start); }
+  bool is_empty() const { return start == end; }
+  operator bool() const { return start == kNullAddress; }
+};
 
 // Sorted, disjoint and non-overlapping memory ranges. A range is of the
 // form [start, end). So there's no [start, end), [end, other_end),
 // because that should have been reduced to [start, other_end).
-using AddressRange = std::pair<Address, Address>;
 class V8_EXPORT_PRIVATE DisjointAllocationPool final {
  public:
-  enum ExtractionMode : bool { kAny = false, kContiguous = true };
-  DisjointAllocationPool() {}
+  DisjointAllocationPool() = default;
 
-  explicit DisjointAllocationPool(Address, Address);
+  explicit DisjointAllocationPool(AddressRange range) : ranges_({range}) {}
 
   DisjointAllocationPool(DisjointAllocationPool&& other) = default;
   DisjointAllocationPool& operator=(DisjointAllocationPool&& other) = default;
 
-  // Merge the ranges of the parameter into this object. Ordering is
-  // preserved. The assumption is that the passed parameter is
-  // not intersecting this object - for example, it was obtained
-  // from a previous Allocate{Pool}.
-  void Merge(DisjointAllocationPool&&);
+  // Merge the parameter range into this object while preserving ordering of the
+  // ranges. The assumption is that the passed parameter is not intersecting
+  // this object - for example, it was obtained from a previous Allocate.
+  void Merge(AddressRange);
 
   // Allocate a contiguous range of size {size}. Return an empty pool on
   // failure.
-  DisjointAllocationPool Allocate(size_t size) {
-    return Extract(size, kContiguous);
-  }
-
-  // Allocate a sub-pool of size {size}. Return an empty pool on failure.
-  DisjointAllocationPool AllocatePool(size_t size) {
-    return Extract(size, kAny);
-  }
+  AddressRange Allocate(size_t size);
 
   bool IsEmpty() const { return ranges_.empty(); }
   const std::list<AddressRange>& ranges() const { return ranges_; }
 
  private:
-  // Extract out a total of {size}. By default, the return may
-  // be more than one range. If kContiguous is passed, the return
-  // will be one range. If the operation fails, this object is
-  // unchanged, and the return {IsEmpty()}
-  DisjointAllocationPool Extract(size_t size, ExtractionMode mode);
-
   std::list<AddressRange> ranges_;
 
   DISALLOW_COPY_AND_ASSIGN(DisjointAllocationPool)
@@ -232,11 +233,6 @@ class V8_EXPORT_PRIVATE WasmCode final {
 // Return a textual description of the kind.
 const char* GetWasmCodeKindAsString(WasmCode::Kind);
 
-// Note that we currently need to add code on the main thread, because we may
-// trigger a GC if we believe there's a chance the GC would clear up native
-// modules. The code is ready for concurrency otherwise, we just need to be
-// careful about this GC consideration. See WouldGCHelp and
-// WasmCodeManager::Commit.
 class V8_EXPORT_PRIVATE NativeModule final {
  public:
   WasmCode* AddCode(const CodeDesc& desc, uint32_t frame_count, uint32_t index,
@@ -282,13 +278,23 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   WasmCode* runtime_stub(WasmCode::RuntimeStubId index) const {
     DCHECK_LT(index, WasmCode::kRuntimeStubCount);
-    return runtime_stub_table_[index];
+    WasmCode* code = runtime_stub_table_[index];
+    DCHECK_NOT_NULL(code);
+    return code;
   }
 
   // Register/release the protected instructions in all code objects with the
   // global trap handler for this process.
   void UnpackAndRegisterProtectedInstructions();
   void ReleaseProtectedInstructions();
+
+  // Transition this module from code relying on trap handlers (i.e. without
+  // explicit memory bounds checks) to code that does not require trap handlers
+  // (i.e. code with explicit bounds checks).
+  // This method must only be called if {use_trap_handler()} is true (it will be
+  // false afterwards). All code in this {NativeModule} needs to be re-added
+  // after calling this method.
+  void DisableTrapHandler();
 
   // Returns the instruction start of code suitable for indirect or import calls
   // for the given function index. If the code at the given index is the lazy
@@ -306,10 +312,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   CompilationState* compilation_state() { return compilation_state_.get(); }
 
-  // TODO(mstarzinger): The link to the {shared_module_data} is deprecated and
+  // TODO(mstarzinger): The link to the {WasmModuleObject} is deprecated and
   // all uses should vanish to make {NativeModule} independent of the Isolate.
-  WasmSharedModuleData* shared_module_data() const;
-  void SetSharedModuleData(Handle<WasmSharedModuleData>);
+  WasmModuleObject* module_object() const;
+  void SetModuleObject(Handle<WasmModuleObject>);
 
   uint32_t num_functions() const { return num_functions_; }
   uint32_t num_imported_functions() const { return num_imported_functions_; }
@@ -324,13 +330,14 @@ class V8_EXPORT_PRIVATE NativeModule final {
   ~NativeModule();
 
  private:
+  friend class WasmCode;
   friend class WasmCodeManager;
   friend class NativeModuleSerializer;
   friend class NativeModuleDeserializer;
   friend class NativeModuleModificationScope;
 
   static base::AtomicNumber<size_t> next_id_;
-  NativeModule(uint32_t num_functions, uint32_t num_imports,
+  NativeModule(Isolate* isolate, uint32_t num_functions, uint32_t num_imports,
                bool can_request_more, VirtualMemory* code_space,
                WasmCodeManager* code_manager, ModuleEnv& env);
 
@@ -355,6 +362,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
   WasmCode* Lookup(Address);
   Address GetLocalAddressFor(Handle<Code>);
   Address CreateTrampolineTo(Handle<Code>);
+  // TODO(7424): Only used for debugging in {WasmCode::Validate}. Remove.
+  Code* ReverseTrampolineLookup(Address target);
 
   void set_code(uint32_t index, WasmCode* code) {
     DCHECK_LT(index, num_functions_);
@@ -380,10 +389,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   std::unique_ptr<CompilationState, CompilationStateDeleter> compilation_state_;
 
-  // A phantom reference to the {WasmSharedModuleData}. It is intentionally not
-  // typed {Handle<WasmSharedModuleData>} because this location will be cleared
+  // A phantom reference to the {WasmModuleObject}. It is intentionally not
+  // typed {Handle<WasmModuleObject>} because this location will be cleared
   // when the phantom reference is cleared.
-  WasmSharedModuleData** shared_module_data_ = nullptr;
+  WasmModuleObject** module_object_ = nullptr;
 
   DisjointAllocationPool free_code_space_;
   DisjointAllocationPool allocated_code_space_;
@@ -394,7 +403,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   size_t committed_code_space_ = 0;
   int modification_scope_depth_ = 0;
   bool can_request_more_memory_;
-  bool use_trap_handler_;
+  bool use_trap_handler_ = false;
   bool is_executable_ = false;
   bool lazy_compile_frozen_ = false;
 
@@ -403,22 +412,20 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
 class V8_EXPORT_PRIVATE WasmCodeManager final {
  public:
-  // The only reason we depend on Isolate is to report native memory used
-  // and held by a GC-ed object. We'll need to mitigate that when we
-  // start sharing wasm heaps.
-  WasmCodeManager(v8::Isolate*, size_t max_committed);
+  explicit WasmCodeManager(size_t max_committed);
   // Create a new NativeModule. The caller is responsible for its
   // lifetime. The native module will be given some memory for code,
   // which will be page size aligned. The size of the initial memory
   // is determined with a heuristic based on the total size of wasm
   // code. The native module may later request more memory.
-  std::unique_ptr<NativeModule> NewNativeModule(const WasmModule& module,
+  // TODO(titzer): isolate is only required here for CompilationState.
+  std::unique_ptr<NativeModule> NewNativeModule(Isolate* isolate,
+                                                const WasmModule& module,
                                                 ModuleEnv& env);
-  std::unique_ptr<NativeModule> NewNativeModule(size_t memory_estimate,
-                                                uint32_t num_functions,
-                                                uint32_t num_imported_functions,
-                                                bool can_request_more,
-                                                ModuleEnv& env);
+  // TODO(titzer): isolate is only required here for CompilationState.
+  std::unique_ptr<NativeModule> NewNativeModule(
+      Isolate* isolate, size_t memory_estimate, uint32_t num_functions,
+      uint32_t num_imported_functions, bool can_request_more, ModuleEnv& env);
 
   WasmCode* LookupCode(Address pc) const;
   WasmCode* GetCodeFromStartAddress(Address pc) const;
@@ -427,6 +434,7 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   void SetModuleCodeSizeHistogram(Histogram* histogram) {
     module_code_size_mb_ = histogram;
   }
+  static size_t EstimateNativeModuleSize(const WasmModule* module);
 
  private:
   friend class NativeModule;
@@ -440,17 +448,12 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   void FreeNativeModule(NativeModule*);
   void Free(VirtualMemory* mem);
   void AssignRanges(Address start, Address end, NativeModule*);
-  size_t GetAllocationChunk(const WasmModule& module);
-  bool WouldGCHelp() const;
 
   std::map<Address, std::pair<Address, NativeModule*>> lookup_map_;
   // Count of NativeModules not yet collected. Helps determine if it's
   // worth requesting a GC on memory pressure.
   size_t active_ = 0;
   std::atomic<size_t> remaining_uncommitted_code_space_;
-
-  // TODO(mtrofin): remove the dependency on isolate.
-  v8::Isolate* isolate_;
 
   // Histogram to update with the maximum used code space for each NativeModule.
   Histogram* module_code_size_mb_ = nullptr;

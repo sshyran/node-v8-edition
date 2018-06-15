@@ -14,15 +14,43 @@ function sourcePositionEq(a, b) {
     a.scriptOffset == b.scriptOffset;
 }
 
-function sourcePositionToStringKey(sourcePosition) {
+function sourcePositionToStringKey(sourcePosition): string {
   if (!sourcePosition) return "undefined";
-  return "" + sourcePosition.inliningId + ":" + sourcePosition.scriptOffset;
+  if (sourcePosition.inliningId && sourcePosition.scriptOffset)
+    return "SP:" + sourcePosition.inliningId + ":" + sourcePosition.scriptOffset;
+  if (sourcePosition.bytecodePosition)
+    return "BCP:" + sourcePosition.bytecodePosition;
+  return "undefined";
+}
+
+function sourcePositionValid(l) {
+  return (typeof l.scriptOffset !== undefined
+    && typeof l.inliningId !== undefined) || typeof l.bytecodePosition != undefined;
 }
 
 interface SourcePosition {
   scriptOffset: number;
   inliningId: number;
 }
+
+interface TurboFanOrigin {
+  phase: string;
+  reducer: string;
+}
+
+interface NodeOrigin {
+  nodeId: number;
+}
+
+interface BytecodePosition {
+  bytecodePosition: number;
+}
+
+type Origin = NodeOrigin | BytecodePosition;
+type TurboFanNodeOrigin = NodeOrigin & TurboFanOrigin;
+type TurboFanBytecodeOrigin = BytecodePosition & TurboFanOrigin;
+
+type AnyPosition = SourcePosition | BytecodePosition;
 
 interface Source {
   sourcePositions: Array<SourcePosition>;
@@ -42,12 +70,12 @@ interface Phase {
   data: any;
 }
 
-interface Schedule {}
-
-interface NodeOrigin {}
+interface Schedule {
+  nodes: Array<any>;
+}
 
 class SourceResolver {
-  nodePositionMap: Array<SourcePosition>;
+  nodePositionMap: Array<AnyPosition>;
   sources: Array<Source>;
   inlinings: Array<Inlining>;
   inliningsMap: Map<string, Inlining>;
@@ -55,6 +83,12 @@ class SourceResolver {
   phases: Array<Phase>;
   phaseNames: Map<string, number>;
   disassemblyPhase: Phase;
+  lineToSourcePositions: Map<string, Array<AnyPosition>>;
+  nodeIdToInstructionRange: Array<[number, number]>;
+  blockIdToInstructionRange: Array<[number, number]>;
+  instructionToPCOffset: Array<number>;
+  pcOffsetToInstructions: Map<number, Array<number>>;
+
 
   constructor() {
     // Maps node ids to source positions.
@@ -73,6 +107,16 @@ class SourceResolver {
     this.phaseNames = new Map();
     // The disassembly phase is stored separately.
     this.disassemblyPhase = undefined;
+    // Maps line numbers to source positions
+    this.lineToSourcePositions = new Map();
+    // Maps node ids to instruction ranges.
+    this.nodeIdToInstructionRange = [];
+    // Maps block ids to instruction ranges.
+    this.blockIdToInstructionRange = [];
+    // Maps instruction numbers to PC offsets.
+    this.instructionToPCOffset = [];
+    // Maps PC offsets to instructions.
+    this.pcOffsetToInstructions = new Map();
   }
 
   setSources(sources, mainBackup) {
@@ -147,7 +191,7 @@ class SourceResolver {
     return nodeIds;
   }
 
-  nodeIdsToSourcePositions(nodeIds) {
+  nodeIdsToSourcePositions(nodeIds): Array<AnyPosition> {
     const sourcePositions = new Map();
     for (const nodeId of nodeIds) {
       let sp = this.nodePositionMap[nodeId];
@@ -249,6 +293,89 @@ class SourceResolver {
     return inliningStack;
   }
 
+  recordOrigins(phase) {
+    if (phase.type != "graph") return;
+    for (const node of phase.data.nodes) {
+      if (node.origin != undefined &&
+        node.origin.bytecodePosition != undefined) {
+        const position = { bytecodePosition: node.origin.bytecodePosition };
+        this.nodePositionMap[node.id] = position;
+        let key = sourcePositionToStringKey(position);
+        if (!this.positionToNodes.has(key)) {
+          this.positionToNodes.set(key, []);
+        }
+        const A = this.positionToNodes.get(key);
+        if (!A.includes(node.id)) A.push("" + node.id);
+      }
+    }
+  }
+
+  readNodeIdToInstructionRange(nodeIdToInstructionRange) {
+    for (const [nodeId, range] of Object.entries<[number, number]>(nodeIdToInstructionRange)) {
+      this.nodeIdToInstructionRange[nodeId] = range;
+    }
+  }
+
+  readBlockIdToInstructionRange(blockIdToInstructionRange) {
+    for (const [blockId, range] of Object.entries<[number, number]>(blockIdToInstructionRange)) {
+      this.blockIdToInstructionRange[blockId] = range;
+    }
+  }
+
+  getInstruction(nodeId):[number, number] {
+    const X = this.nodeIdToInstructionRange[nodeId];
+    if (X === undefined) return [-1, -1];
+    return X;
+  }
+
+  getInstructionRangeForBlock(blockId):[number, number] {
+    const X = this.blockIdToInstructionRange[blockId];
+    if (X === undefined) return [-1, -1];
+    return X;
+  }
+
+  readInstructionOffsetToPCOffset(instructionToPCOffset) {
+    for (const [instruction, offset] of Object.entries<number>(instructionToPCOffset)) {
+      this.instructionToPCOffset[instruction] = offset;
+      if (!this.pcOffsetToInstructions.has(offset)) {
+        this.pcOffsetToInstructions.set(offset, []);
+      }
+      this.pcOffsetToInstructions.get(offset).push(instruction);
+    }
+    console.log(this.pcOffsetToInstructions);
+  }
+
+  hasPCOffsets() {
+    return this.pcOffsetToInstructions.size > 0;
+  }
+
+
+  nodesForPCOffset(offset): [Array<String>, Array<String>] {
+    const keys = Array.from(this.pcOffsetToInstructions.keys()).sort((a, b) => b - a);
+    if (keys.length === 0) return [[],[]];
+    for (const key of keys) {
+      if (key <= offset) {
+        const instrs = this.pcOffsetToInstructions.get(key);
+        const nodes = [];
+        const blocks = [];
+        for (const instr of instrs) {
+          for (const [nodeId, range] of this.nodeIdToInstructionRange.entries()) {
+            if (!range) continue;
+            const [start, end] = range;
+            if (start == end && instr == start) {
+              nodes.push("" + nodeId);
+            }
+            if (start <= instr && instr < end) {
+              nodes.push("" + nodeId);
+            }
+          }
+        }
+        return [nodes, blocks];
+      }
+    }
+    return [[],[]];
+  }
+
   parsePhases(phases) {
     for (const [phaseId, phase] of Object.entries<Phase>(phases)) {
       if (phase.type == 'disassembly') {
@@ -256,8 +383,19 @@ class SourceResolver {
       } else if (phase.type == 'schedule') {
         this.phases.push(this.parseSchedule(phase))
         this.phaseNames.set(phase.name, this.phases.length);
+      } else if (phase.type == 'instructions') {
+        if (phase.nodeIdToInstructionRange) {
+          this.readNodeIdToInstructionRange(phase.nodeIdToInstructionRange);
+        }
+        if (phase.blockIdtoInstructionRange) {
+          this.readBlockIdToInstructionRange(phase.blockIdtoInstructionRange);
+        }
+        if (phase.instructionOffsetToPCOffset) {
+          this.readInstructionOffsetToPCOffset(phase.instructionOffsetToPCOffset);
+        }
       } else {
         this.phases.push(phase);
+        this.recordOrigins(phase);
         this.phaseNames.set(phase.name, this.phases.length);
       }
     }
@@ -279,6 +417,28 @@ class SourceResolver {
     this.phases.forEach(f);
   }
 
+  addAnyPositionToLine(lineNumber: number | String, sourcePosition: AnyPosition) {
+    const lineNumberString = anyToString(lineNumber);
+    if (!this.lineToSourcePositions.has(lineNumberString)) {
+      this.lineToSourcePositions.set(lineNumberString, []);
+    }
+    const A = this.lineToSourcePositions.get(lineNumberString);
+    if (!A.includes(sourcePosition)) A.push(sourcePosition);
+  }
+
+  setSourceLineToBytecodePosition(sourceLineToBytecodePosition: Array<number> | undefined) {
+    if (!sourceLineToBytecodePosition) return;
+    sourceLineToBytecodePosition.forEach((pos, i) => {
+      this.addAnyPositionToLine(i, { bytecodePosition: pos });
+    });
+  }
+
+  linetoSourcePositions(lineNumber: number | String) {
+    const positions = this.lineToSourcePositions.get(anyToString(lineNumber));
+    if (positions === undefined) return [];
+    return positions;
+  }
+
   parseSchedule(phase) {
     function createNode(state, match) {
       let inputs = [];
@@ -287,11 +447,13 @@ class SourceResolver {
         const nodeIdStrings = nodeIdsString.split(',');
         inputs = nodeIdStrings.map((n) => Number.parseInt(n, 10));
       }
-      const node = {id: Number.parseInt(match.groups.id, 10),
-                    label: match.groups.label,
-                    inputs: inputs};
+      const node = {
+        id: Number.parseInt(match.groups.id, 10),
+        label: match.groups.label,
+        inputs: inputs
+      };
       if (match.groups.blocks) {
-        const nodeIdsString = match.groups.blocks.replace(/\s/g, '').replace(/B/g,'');
+        const nodeIdsString = match.groups.blocks.replace(/\s/g, '').replace(/B/g, '');
         const nodeIdStrings = nodeIdsString.split(',');
         const successors = nodeIdStrings.map((n) => Number.parseInt(n, 10));
         state.currentBlock.succ = successors;
@@ -306,11 +468,13 @@ class SourceResolver {
         const blockIdStrings = blockIdsString.split(',');
         predecessors = blockIdStrings.map((n) => Number.parseInt(n, 10));
       }
-      const block = {id: Number.parseInt(match.groups.id, 10),
-                     isDeferred: match.groups.deferred != undefined,
-                     pred: predecessors.sort(),
-                     succ: [],
-                     nodes: []};
+      const block = {
+        id: Number.parseInt(match.groups.id, 10),
+        isDeferred: match.groups.deferred != undefined,
+        pred: predecessors.sort(),
+        succ: [],
+        nodes: []
+      };
       state.blocks[block.id] = block;
       state.currentBlock = block;
     }
@@ -320,7 +484,7 @@ class SourceResolver {
     const rules = [
       {
         lineRegexps:
-          [ /^\s*(?<id>\d+):\ (?<label>.*)\((?<args>.*)\)$/,
+          [/^\s*(?<id>\d+):\ (?<label>.*)\((?<args>.*)\)$/,
             /^\s*(?<id>\d+):\ (?<label>.*)\((?<args>.*)\)\ ->\ (?<blocks>.*)$/,
             /^\s*(?<id>\d+):\ (?<label>.*)$/
           ],

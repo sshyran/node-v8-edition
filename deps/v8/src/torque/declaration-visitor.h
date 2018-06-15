@@ -59,9 +59,6 @@ class DeclarationVisitor : public FileVisitor {
     Visit(expr->index);
   }
   void Visit(FieldAccessExpression* expr) { Visit(expr->object); }
-  void Visit(CastExpression* expr) { Visit(expr->value); }
-  void Visit(UnsafeCastExpression* expr) { Visit(expr->value); }
-  void Visit(ConvertExpression* expr) { Visit(expr->value); }
   void Visit(BlockStatement* expr) {
     Declarations::NodeScopeActivator scope(declarations(), expr);
     for (Statement* stmt : expr->statements) Visit(stmt);
@@ -345,11 +342,13 @@ class DeclarationVisitor : public FileVisitor {
   }
 
   void DeclareSignature(const Signature& signature) {
-    auto name_iterator = signature.parameter_names.begin();
-    for (auto t : signature.types()) {
-      const std::string& name(*name_iterator++);
-      declarations()->DeclareParameter(name, GetParameterVariableFromName(name),
-                                       t);
+    auto type_iterator = signature.parameter_types.types.begin();
+    for (auto name : signature.parameter_names) {
+      const Type* t(*type_iterator++);
+      if (name.size() != 0) {
+        declarations()->DeclareParameter(name,
+                                         GetParameterVariableFromName(name), t);
+      }
     }
     for (auto& label : signature.labels) {
       auto label_params = label.types;

@@ -14,12 +14,8 @@ BUILTIN: 'builtin';
 RUNTIME: 'runtime';
 MODULE: 'module';
 JAVASCRIPT: 'javascript';
-IMPLICIT: 'implicit';
 DEFERRED: 'deferred';
 IF: 'if';
-CAST_KEYWORD: 'cast';
-UNSAFE_CAST_KEYWORD: 'unsafe_cast';
-CONVERT_KEYWORD: 'convert';
 FOR: 'for';
 WHILE: 'while';
 RETURN: 'return';
@@ -216,9 +212,6 @@ primaryExpression
         : helperCall
         | DECIMAL_LITERAL
         | STRING_LITERAL
-        | CAST_KEYWORD '<' type '>' '(' expression ')' OTHERWISE IDENTIFIER
-        | UNSAFE_CAST_KEYWORD '<' type '>' '(' expression ')'
-        | CONVERT_KEYWORD '<' type '>' '(' expression ')'
         | ('(' expression ')');
 
 forInitialization : variableDeclarationWithInitialization?;
@@ -279,11 +272,11 @@ typeDeclaration : 'type' IDENTIFIER extendsDeclaration? generatesDeclaration? co
 typeAliasDeclaration : 'type' IDENTIFIER '=' type ';';
 
 externalBuiltin : EXTERN JAVASCRIPT? BUILTIN IDENTIFIER optionalGenericTypeList '(' typeList ')' optionalType ';';
-externalMacro : EXTERN (IMPLICIT? 'operator' STRING_LITERAL)? MACRO IDENTIFIER optionalGenericTypeList typeListMaybeVarArgs optionalType optionalLabelList ';';
+externalMacro : EXTERN ('operator' STRING_LITERAL)? MACRO IDENTIFIER optionalGenericTypeList typeListMaybeVarArgs optionalType optionalLabelList ';';
 externalRuntime : EXTERN RUNTIME IDENTIFIER typeListMaybeVarArgs optionalType ';';
 builtinDeclaration : JAVASCRIPT? BUILTIN IDENTIFIER optionalGenericTypeList parameterList optionalType (helperBody | ';');
 genericSpecialization: IDENTIFIER genericSpecializationTypeList parameterList optionalType optionalLabelList helperBody;
-macroDeclaration : MACRO IDENTIFIER optionalGenericTypeList parameterList optionalType optionalLabelList (helperBody | ';');
+macroDeclaration : ('operator' STRING_LITERAL)? MACRO IDENTIFIER optionalGenericTypeList parameterList optionalType optionalLabelList (helperBody | ';');
 constDeclaration : 'const' IDENTIFIER ':' type '=' STRING_LITERAL ';';
 
 declaration

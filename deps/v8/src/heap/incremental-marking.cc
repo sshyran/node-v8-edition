@@ -16,6 +16,7 @@
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/objects-visiting.h"
 #include "src/heap/sweeper.h"
+#include "src/objects/hash-table-inl.h"
 #include "src/tracing/trace-event.h"
 #include "src/v8.h"
 #include "src/visitors.h"
@@ -98,7 +99,8 @@ void IncrementalMarking::RecordWriteSlow(HeapObject* obj,
                                          Object* value) {
   if (BaseRecordWrite(obj, value) && slot != nullptr) {
     // Object is not going to be rescanned we need to record the slot.
-    heap_->mark_compact_collector()->RecordSlot(obj, slot, value);
+    heap_->mark_compact_collector()->RecordSlot(obj, slot,
+                                                HeapObject::cast(value));
   }
 }
 
@@ -486,16 +488,14 @@ void IncrementalMarking::MarkRoots() {
   heap_->IterateStrongRoots(&visitor, VISIT_ONLY_STRONG);
 }
 
-bool ShouldRetainMap(Map* map, int age) {
+bool IncrementalMarking::ShouldRetainMap(Map* map, int age) {
   if (age == 0) {
     // The map has aged. Do not retain this map.
     return false;
   }
   Object* constructor = map->GetConstructor();
-  Heap* heap = map->GetHeap();
   if (!constructor->IsHeapObject() ||
-      heap->incremental_marking()->marking_state()->IsWhite(
-          HeapObject::cast(constructor))) {
+      marking_state()->IsWhite(HeapObject::cast(constructor))) {
     // The constructor is dead, no new objects with this map can
     // be created. Do not retain this map.
     return false;
@@ -693,6 +693,27 @@ void IncrementalMarking::UpdateWeakReferencesAfterScavenge() {
           // get scavenged). Drop references to it.
           return false;
         }
+        *slot_out = slot_in;
+        return true;
+      });
+  weak_objects_->ephemeron_hash_tables.Update(
+      [heap](EphemeronHashTable* slot_in,
+             EphemeronHashTable** slot_out) -> bool {
+        HeapObject* heap_obj = slot_in;
+        MapWord map_word = heap_obj->map_word();
+        if (map_word.IsForwardingAddress()) {
+          *slot_out = EphemeronHashTable::cast(map_word.ToForwardingAddress());
+          return true;
+        }
+
+        if (heap->InNewSpace(heap_obj)) {
+          // An object could die in scavenge even though an earlier full GC's
+          // concurrent marking has already marked it. In the case of an
+          // EphemeronHashTable it would have already been added to the
+          // worklist. If that happens the table needs to be removed again.
+          return false;
+        }
+
         *slot_out = slot_in;
         return true;
       });

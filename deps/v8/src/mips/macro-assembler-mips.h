@@ -8,6 +8,7 @@
 #include "src/assembler.h"
 #include "src/globals.h"
 #include "src/mips/assembler-mips.h"
+#include "src/turbo-assembler.h"
 
 namespace v8 {
 namespace internal {
@@ -126,20 +127,14 @@ inline MemOperand CFunctionArgumentOperand(int index) {
   return MemOperand(sp, offset);
 }
 
-class TurboAssembler : public Assembler {
+class TurboAssembler : public TurboAssemblerBase {
  public:
   TurboAssembler(Isolate* isolate, void* buffer, int buffer_size,
-                 CodeObjectRequired create_code_object);
+                 CodeObjectRequired create_code_object)
+      : TurboAssemblerBase(isolate, buffer, buffer_size, create_code_object) {}
 
-  void set_has_frame(bool value) { has_frame_ = value; }
-  bool has_frame() const { return has_frame_; }
-
-  Isolate* isolate() const { return isolate_; }
-
-  Handle<HeapObject> CodeObject() {
-    DCHECK(!code_object_.is_null());
-    return code_object_;
-  }
+  TurboAssembler(IsolateData isolate_data, void* buffer, int buffer_size)
+      : TurboAssemblerBase(isolate_data, buffer, buffer_size) {}
 
   // Activation support.
   void EnterFrame(StackFrame::Type type);
@@ -251,10 +246,12 @@ class TurboAssembler : public Assembler {
   void li(Register dst, ExternalReference value, LiFlags mode = OPTIMIZE_SIZE);
 
 #ifdef V8_EMBEDDED_BUILTINS
-  void LookupConstant(Register destination, Handle<HeapObject> object);
-  void LookupExternalReference(Register destination,
-                               ExternalReference reference);
-  void LoadBuiltin(Register destination, int builtin_index);
+  void LoadFromConstantsTable(Register destination,
+                              int constant_index) override;
+  void LoadExternalReference(Register destination,
+                             int reference_index) override;
+  void LoadBuiltin(Register destination, int builtin_index) override;
+  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
 #endif  // V8_EMBEDDED_BUILTINS
 
 // Jump, Call, and Ret pseudo instructions implementing inter-working.
@@ -552,9 +549,9 @@ class TurboAssembler : public Assembler {
   void CallStubDelayed(CodeStub* stub, COND_ARGS);
 #undef COND_ARGS
 
-  // TODO(jgruber): Remove in favor of MacroAssembler::CallRuntime.
-  void CallRuntimeDelayed(Zone* zone, Runtime::FunctionId fid,
-                          SaveFPRegsMode save_doubles = kDontSaveFPRegs);
+  // Call a runtime routine. This expects {centry} to contain a fitting CEntry
+  // builtin for the target runtime function and uses an indirect call.
+  void CallRuntimeWithCEntry(Runtime::FunctionId fid, Register centry);
 
   // Performs a truncating conversion of a floating point number as used by
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
@@ -569,7 +566,7 @@ class TurboAssembler : public Assembler {
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32.
   // Exits with 'result' holding the answer.
   void TruncateDoubleToI(Isolate* isolate, Zone* zone, Register result,
-                         DoubleRegister double_input);
+                         DoubleRegister double_input, StubCallMode stub_mode);
 
   // Conditional move.
   void Movz(Register rd, Register rs, Register rt);
@@ -814,7 +811,7 @@ class TurboAssembler : public Assembler {
                            Func GetLabelFunction);
 
   // Load an object from the root table.
-  void LoadRoot(Register destination, Heap::RootListIndex index);
+  void LoadRoot(Register destination, Heap::RootListIndex index) override;
   void LoadRoot(Register destination, Heap::RootListIndex index, Condition cond,
                 Register src1, const Operand& src2);
 
@@ -847,13 +844,6 @@ class TurboAssembler : public Assembler {
 
   void ResetSpeculationPoisonRegister();
 
-  bool root_array_available() const { return root_array_available_; }
-  void set_root_array_available(bool v) { root_array_available_ = v; }
-
-  void set_builtin_index(int builtin_index) {
-    maybe_builtin_index_ = builtin_index;
-  }
-
  protected:
   void BranchLong(Label* L, BranchDelaySlot bdslot);
 
@@ -861,15 +851,8 @@ class TurboAssembler : public Assembler {
 
   inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
 
-  // This handle will be patched with the code object on installation.
-  Handle<HeapObject> code_object_;
-
  private:
-  int maybe_builtin_index_ = -1;  // May be set while generating builtins.
-  bool has_frame_ = false;
-  bool root_array_available_ = true;
-  Isolate* const isolate_;
-  bool has_double_zero_reg_set_;
+  bool has_double_zero_reg_set_ = false;
 
   void CallCFunctionHelper(Register function_base, int16_t function_offset,
                            int num_reg_arguments, int num_double_arguments);

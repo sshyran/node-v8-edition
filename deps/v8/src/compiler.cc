@@ -198,7 +198,7 @@ CompilationJob::Status OptimizedCompilationJob::PrepareJob(Isolate* isolate) {
   DisallowJavascriptExecution no_js(isolate);
 
   if (FLAG_trace_opt && compilation_info()->IsOptimizing()) {
-    OFStream os(stdout);
+    StdoutStream os;
     os << "[compiling method " << Brief(*compilation_info()->closure())
        << " using " << compiler_name_;
     if (compilation_info()->is_osr()) os << " OSR";
@@ -509,8 +509,7 @@ bool FinalizeUnoptimizedCode(
   DCHECK(AllowCompilation::IsAllowed(isolate));
 
   // Allocate scope infos for the literal.
-  DeclarationScope::AllocateScopeInfos(parse_info, isolate,
-                                       AnalyzeMode::kRegular);
+  DeclarationScope::AllocateScopeInfos(parse_info, isolate);
 
   // Finalize the outer-most function's compilation job.
   if (FinalizeUnoptimizedCompilationJob(outer_function_job, shared_info,
@@ -711,7 +710,7 @@ MaybeHandle<Code> GetOptimizedCode(Handle<JSFunction> function,
   // tolerate the lack of a script without bytecode.
   DCHECK_IMPLIES(!has_script, shared->HasBytecodeArray());
   std::unique_ptr<OptimizedCompilationJob> job(
-      compiler::Pipeline::NewCompilationJob(function, has_script));
+      compiler::Pipeline::NewCompilationJob(isolate, function, has_script));
   OptimizedCompilationInfo* compilation_info = job->compilation_info();
 
   compilation_info->SetOptimizingForOsr(osr_offset, osr_frame);
@@ -1136,7 +1135,7 @@ bool Compiler::Compile(Handle<JSFunction> function, ClearExceptionFlag flag) {
   DCHECK(!function->HasOptimizedCode());
 
   Isolate* isolate = function->GetIsolate();
-  Handle<SharedFunctionInfo> shared_info = handle(function->shared());
+  Handle<SharedFunctionInfo> shared_info = handle(function->shared(), isolate);
 
   // Ensure shared function info is compiled.
   if (!shared_info->is_compiled() && !Compile(shared_info, flag)) return false;
@@ -1296,7 +1295,7 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
       // If the position is missing, attempt to get the code offset by
       // walking the stack. Do not translate the code offset into source
       // position, but store it as negative value for lazy translation.
-      StackTraceFrameIterator it(script->GetIsolate());
+      StackTraceFrameIterator it(isolate);
       if (!it.done() && it.is_javascript()) {
         FrameSummary summary = FrameSummary::GetTop(it.javascript_frame());
         script->set_eval_from_shared(
@@ -1314,7 +1313,7 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
     parse_info.set_parse_restriction(restriction);
     parse_info.set_parameters_end_pos(parameters_end_pos);
     if (!context->IsNativeContext()) {
-      parse_info.set_outer_scope_info(handle(context->scope_info()));
+      parse_info.set_outer_scope_info(handle(context->scope_info(), isolate));
     }
     DCHECK(!parse_info.is_module());
 
@@ -1786,7 +1785,7 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
     parse_info.set_wrapped_as_function();
     // parse_info.set_eager(compile_options == ScriptCompiler::kEagerCompile);
     if (!context->IsNativeContext()) {
-      parse_info.set_outer_scope_info(handle(context->scope_info()));
+      parse_info.set_outer_scope_info(handle(context->scope_info(), isolate));
     }
     parse_info.set_language_mode(
         stricter_language_mode(parse_info.language_mode(), language_mode));

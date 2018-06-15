@@ -199,11 +199,10 @@ ModuleScope::ModuleScope(DeclarationScope* script_scope,
   DeclareThis(ast_value_factory);
 }
 
-ModuleScope::ModuleScope(Handle<ScopeInfo> scope_info,
+ModuleScope::ModuleScope(Isolate* isolate, Handle<ScopeInfo> scope_info,
                          AstValueFactory* avfactory)
     : DeclarationScope(avfactory->zone(), MODULE_SCOPE, scope_info) {
   Zone* zone = avfactory->zone();
-  Isolate* isolate = scope_info->GetIsolate();
   Handle<ModuleInfo> module_info(scope_info->ModuleDescriptorInfo(), isolate);
 
   set_language_mode(LanguageMode::kStrict);
@@ -390,7 +389,8 @@ bool Scope::ContainsAsmModule() const {
   return false;
 }
 
-Scope* Scope::DeserializeScopeChain(Zone* zone, ScopeInfo* scope_info,
+Scope* Scope::DeserializeScopeChain(Isolate* isolate, Zone* zone,
+                                    ScopeInfo* scope_info,
                                     DeclarationScope* script_scope,
                                     AstValueFactory* ast_value_factory,
                                     DeserializationMode deserialization_mode) {
@@ -401,7 +401,8 @@ Scope* Scope::DeserializeScopeChain(Zone* zone, ScopeInfo* scope_info,
   while (scope_info) {
     if (scope_info->scope_type() == WITH_SCOPE) {
       // For scope analysis, debug-evaluate is equivalent to a with scope.
-      outer_scope = new (zone) Scope(zone, WITH_SCOPE, handle(scope_info));
+      outer_scope =
+          new (zone) Scope(zone, WITH_SCOPE, handle(scope_info, isolate));
 
       // TODO(yangguo): Remove once debug-evaluate properly keeps track of the
       // function scope in which we are evaluating.
@@ -413,28 +414,29 @@ Scope* Scope::DeserializeScopeChain(Zone* zone, ScopeInfo* scope_info,
       // scope info of this script context onto the existing script scope to
       // avoid nesting script scopes.
       if (deserialization_mode == DeserializationMode::kIncludingVariables) {
-        script_scope->SetScriptScopeInfo(handle(scope_info));
+        script_scope->SetScriptScopeInfo(handle(scope_info, isolate));
       }
       DCHECK(!scope_info->HasOuterScopeInfo());
       break;
     } else if (scope_info->scope_type() == FUNCTION_SCOPE) {
-      outer_scope =
-          new (zone) DeclarationScope(zone, FUNCTION_SCOPE, handle(scope_info));
+      outer_scope = new (zone)
+          DeclarationScope(zone, FUNCTION_SCOPE, handle(scope_info, isolate));
       if (scope_info->IsAsmModule())
         outer_scope->AsDeclarationScope()->set_asm_module();
     } else if (scope_info->scope_type() == EVAL_SCOPE) {
-      outer_scope =
-          new (zone) DeclarationScope(zone, EVAL_SCOPE, handle(scope_info));
+      outer_scope = new (zone)
+          DeclarationScope(zone, EVAL_SCOPE, handle(scope_info, isolate));
     } else if (scope_info->scope_type() == BLOCK_SCOPE) {
       if (scope_info->is_declaration_scope()) {
-        outer_scope =
-            new (zone) DeclarationScope(zone, BLOCK_SCOPE, handle(scope_info));
+        outer_scope = new (zone)
+            DeclarationScope(zone, BLOCK_SCOPE, handle(scope_info, isolate));
       } else {
-        outer_scope = new (zone) Scope(zone, BLOCK_SCOPE, handle(scope_info));
+        outer_scope =
+            new (zone) Scope(zone, BLOCK_SCOPE, handle(scope_info, isolate));
       }
     } else if (scope_info->scope_type() == MODULE_SCOPE) {
-      outer_scope =
-          new (zone) ModuleScope(handle(scope_info), ast_value_factory);
+      outer_scope = new (zone)
+          ModuleScope(isolate, handle(scope_info, isolate), ast_value_factory);
     } else {
       DCHECK_EQ(scope_info->scope_type(), CATCH_SCOPE);
       DCHECK_EQ(scope_info->LocalCount(), 1);
@@ -444,9 +446,9 @@ Scope* Scope::DeserializeScopeChain(Zone* zone, ScopeInfo* scope_info,
       String* name = scope_info->ContextLocalName(0);
       MaybeAssignedFlag maybe_assigned =
           scope_info->ContextLocalMaybeAssignedFlag(0);
-      outer_scope =
-          new (zone) Scope(zone, ast_value_factory->GetString(handle(name)),
-                           maybe_assigned, handle(scope_info));
+      outer_scope = new (zone)
+          Scope(zone, ast_value_factory->GetString(handle(name, isolate)),
+                maybe_assigned, handle(scope_info, isolate));
     }
     if (deserialization_mode == DeserializationMode::kScopesOnly) {
       outer_scope->scope_info_ = Handle<ScopeInfo>::null();
@@ -635,7 +637,7 @@ void DeclarationScope::AttachOuterScopeInfo(ParseInfo* info, Isolate* isolate) {
           DeclarationScope(info->zone(), info->ast_value_factory());
       info->set_script_scope(script_scope);
       ReplaceOuterScope(Scope::DeserializeScopeChain(
-          info->zone(), *outer_scope_info, script_scope,
+          isolate, info->zone(), *outer_scope_info, script_scope,
           info->ast_value_factory(),
           Scope::DeserializationMode::kIncludingVariables));
     } else {
@@ -2367,21 +2369,8 @@ void Scope::AllocateScopeInfosRecursively(Isolate* isolate,
   }
 }
 
-void Scope::AllocateDebuggerScopeInfos(Isolate* isolate,
-                                       MaybeHandle<ScopeInfo> outer_scope) {
-  if (scope_info_.is_null()) {
-    scope_info_ = ScopeInfo::Create(isolate, zone(), this, outer_scope);
-  }
-  MaybeHandle<ScopeInfo> outer = NeedsContext() ? scope_info_ : outer_scope;
-  for (Scope* scope = inner_scope_; scope != nullptr; scope = scope->sibling_) {
-    if (scope->is_function_scope()) continue;
-    scope->AllocateDebuggerScopeInfos(isolate, outer);
-  }
-}
-
 // static
-void DeclarationScope::AllocateScopeInfos(ParseInfo* info, Isolate* isolate,
-                                          AnalyzeMode mode) {
+void DeclarationScope::AllocateScopeInfos(ParseInfo* info, Isolate* isolate) {
   DeclarationScope* scope = info->literal()->scope();
   if (!scope->scope_info_.is_null()) return;  // Allocated by outer function.
 
@@ -2391,9 +2380,6 @@ void DeclarationScope::AllocateScopeInfos(ParseInfo* info, Isolate* isolate,
   }
 
   scope->AllocateScopeInfosRecursively(isolate, outer_scope);
-  if (mode == AnalyzeMode::kDebugger) {
-    scope->AllocateDebuggerScopeInfos(isolate, outer_scope);
-  }
 
   // The debugger expects all shared function infos to contain a scope info.
   // Since the top-most scope will end up in a shared function info, make sure
@@ -2407,7 +2393,8 @@ void DeclarationScope::AllocateScopeInfos(ParseInfo* info, Isolate* isolate,
   // Ensuring that the outer script scope has a scope info avoids having
   // special case for native contexts vs other contexts.
   if (info->script_scope() && info->script_scope()->scope_info_.is_null()) {
-    info->script_scope()->scope_info_ = handle(ScopeInfo::Empty(isolate));
+    info->script_scope()->scope_info_ =
+        handle(ScopeInfo::Empty(isolate), isolate);
   }
 }
 

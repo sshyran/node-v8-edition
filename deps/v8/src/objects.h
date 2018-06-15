@@ -103,7 +103,6 @@
 //         - ModuleInfo
 //         - ScriptContextTable
 //         - FixedArrayOfWeakCells
-//         - WasmSharedModuleData
 //         - WasmCompiledModule
 //       - FixedDoubleArray
 //     - Name
@@ -386,7 +385,6 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
   V(ACCESSOR_PAIR_TYPE)                                         \
   V(ALIASED_ARGUMENTS_ENTRY_TYPE)                               \
   V(ALLOCATION_MEMENTO_TYPE)                                    \
-  V(ALLOCATION_SITE_TYPE)                                       \
   V(ASYNC_GENERATOR_REQUEST_TYPE)                               \
   V(DEBUG_INFO_TYPE)                                            \
   V(FUNCTION_TEMPLATE_INFO_TYPE)                                \
@@ -405,7 +403,6 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
   V(WASM_COMPILED_MODULE_TYPE)                                  \
   V(WASM_DEBUG_INFO_TYPE)                                       \
   V(WASM_EXPORTED_FUNCTION_DATA_TYPE)                           \
-  V(WASM_SHARED_MODULE_DATA_TYPE)                               \
                                                                 \
   V(CALLABLE_TASK_TYPE)                                         \
   V(CALLBACK_TASK_TYPE)                                         \
@@ -413,9 +410,12 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
   V(PROMISE_REJECT_REACTION_JOB_TASK_TYPE)                      \
   V(PROMISE_RESOLVE_THENABLE_JOB_TASK_TYPE)                     \
                                                                 \
+  V(ALLOCATION_SITE_TYPE)                                       \
+                                                                \
   V(FIXED_ARRAY_TYPE)                                           \
   V(BOILERPLATE_DESCRIPTION_TYPE)                               \
   V(HASH_TABLE_TYPE)                                            \
+  V(EPHEMERON_HASH_TABLE_TYPE)                                  \
   V(SCOPE_INFO_TYPE)                                            \
                                                                 \
   V(BLOCK_CONTEXT_TYPE)                                         \
@@ -572,7 +572,6 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
   V(ACCESSOR_PAIR, AccessorPair, accessor_pair)                              \
   V(ALIASED_ARGUMENTS_ENTRY, AliasedArgumentsEntry, aliased_arguments_entry) \
   V(ALLOCATION_MEMENTO, AllocationMemento, allocation_memento)               \
-  V(ALLOCATION_SITE, AllocationSite, allocation_site)                        \
   V(ASYNC_GENERATOR_REQUEST, AsyncGeneratorRequest, async_generator_request) \
   V(DEBUG_INFO, DebugInfo, debug_info)                                       \
   V(FUNCTION_TEMPLATE_INFO, FunctionTemplateInfo, function_template_info)    \
@@ -592,7 +591,6 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
   V(WASM_DEBUG_INFO, WasmDebugInfo, wasm_debug_info)                         \
   V(WASM_EXPORTED_FUNCTION_DATA, WasmExportedFunctionData,                   \
     wasm_exported_function_data)                                             \
-  V(WASM_SHARED_MODULE_DATA, WasmSharedModuleData, wasm_shared_module_data)  \
   V(CALLABLE_TASK, CallableTask, callable_task)                              \
   V(CALLBACK_TASK, CallbackTask, callback_task)                              \
   V(PROMISE_FULFILL_REACTION_JOB_TASK, PromiseFulfillReactionJobTask,        \
@@ -601,6 +599,11 @@ const int kStubMinorKeyBits = kSmiValueSize - kStubMajorKeyBits - 1;
     promise_reject_reaction_job_task)                                        \
   V(PROMISE_RESOLVE_THENABLE_JOB_TASK, PromiseResolveThenableJobTask,        \
     promise_resolve_thenable_job_task)
+
+#define ALLOCATION_SITE_LIST(V)                                     \
+  V(ALLOCATION_SITE, AllocationSite, WithWeakNext, allocation_site) \
+  V(ALLOCATION_SITE, AllocationSite, WithoutWeakNext,               \
+    allocation_site_without_weaknext)
 
 #define DATA_HANDLER_LIST(V)                        \
   V(LOAD_HANDLER, LoadHandler, 1, load_handler1)    \
@@ -768,7 +771,6 @@ enum InstanceType : uint16_t {
   ACCESSOR_PAIR_TYPE,
   ALIASED_ARGUMENTS_ENTRY_TYPE,
   ALLOCATION_MEMENTO_TYPE,
-  ALLOCATION_SITE_TYPE,
   ASYNC_GENERATOR_REQUEST_TYPE,
   DEBUG_INFO_TYPE,
   FUNCTION_TEMPLATE_INFO_TYPE,
@@ -787,7 +789,6 @@ enum InstanceType : uint16_t {
   WASM_COMPILED_MODULE_TYPE,
   WASM_DEBUG_INFO_TYPE,
   WASM_EXPORTED_FUNCTION_DATA_TYPE,
-  WASM_SHARED_MODULE_DATA_TYPE,
 
   CALLABLE_TASK_TYPE,  // FIRST_MICROTASK_TYPE
   CALLBACK_TASK_TYPE,
@@ -795,10 +796,12 @@ enum InstanceType : uint16_t {
   PROMISE_REJECT_REACTION_JOB_TASK_TYPE,
   PROMISE_RESOLVE_THENABLE_JOB_TASK_TYPE,  // LAST_MICROTASK_TYPE
 
+  ALLOCATION_SITE_TYPE,
   // FixedArrays.
   FIXED_ARRAY_TYPE,  // FIRST_FIXED_ARRAY_TYPE
   BOILERPLATE_DESCRIPTION_TYPE,
   HASH_TABLE_TYPE,
+  EPHEMERON_HASH_TABLE_TYPE,
   SCOPE_INFO_TYPE,
   BLOCK_CONTEXT_TYPE,  // FIRST_CONTEXT_TYPE
   CATCH_CONTEXT_TYPE,
@@ -1028,6 +1031,7 @@ template <class C> inline bool Is(Object* obj);
 #define HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V) \
   V(AbstractCode)                              \
   V(AccessCheckNeeded)                         \
+  V(AllocationSite)                            \
   V(ArrayList)                                 \
   V(BigInt)                                    \
   V(BigIntWrapper)                             \
@@ -1054,6 +1058,7 @@ template <class C> inline bool Is(Object* obj);
   V(DeoptimizationData)                        \
   V(DependentCode)                             \
   V(DescriptorArray)                           \
+  V(EphemeronHashTable)                        \
   V(EnumCache)                                 \
   V(External)                                  \
   V(ExternalOneByteString)                     \
@@ -1237,6 +1242,16 @@ class Object {
 #undef IS_TYPE_FUNCTION_DECL
 
   INLINE(bool IsNullOrUndefined(Isolate* isolate) const);
+
+// Non-isolate version of oddball check. This is slower than the above check,
+// so it should only be used for DCHECKS.
+#ifdef DEBUG
+#define IS_TYPE_FUNCTION_DECL(Type, Value) INLINE(bool Is##Type() const);
+  ODDBALL_LIST(IS_TYPE_FUNCTION_DECL)
+#undef IS_TYPE_FUNCTION_DECL
+
+  INLINE(bool IsNullOrUndefined() const);
+#endif
 
   // A non-keyed store is of the form a.x = foo or a["x"] = foo whereas
   // a keyed store is of the form a[expression] = foo.
@@ -1537,6 +1552,23 @@ class Object {
   // and length.
   bool IterationHasObservableEffects();
 
+  enum class OptionType : bool { String, Boolean };
+
+#ifdef V8_INTL_SUPPORT
+  // ECMA402 9.2.10. GetOption( options, property, type, type, values, fallback)
+  // ecma402/#sec-getoption
+  //
+  // Instead of passing undefined for the values argument as the spec
+  // defines, pass in an empty fixed array.
+  //
+  // service is a string denoting the type of Intl object; used when
+  // printing the error message.
+  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> GetOption(
+      Isolate* isolate, Handle<JSReceiver> options, Handle<Name> property,
+      Object::OptionType type, Handle<FixedArray> values,
+      Handle<Object> fallback, Handle<String> service);
+#endif  // V8_INTL_SUPPORT
+
   DECL_VERIFIER(Object)
 #ifdef VERIFY_HEAP
   // Verify a pointer is a valid object pointer.
@@ -1800,6 +1832,16 @@ class HeapObject: public Object {
 
   INLINE(bool IsNullOrUndefined(Isolate* isolate) const);
 
+// Non-isolate version of oddball check. This is slower than the above check,
+// so it should only be used for DCHECKS.
+#ifdef DEBUG
+#define IS_TYPE_FUNCTION_DECL(Type, Value) INLINE(bool Is##Type() const);
+  ODDBALL_LIST(IS_TYPE_FUNCTION_DECL)
+#undef IS_TYPE_FUNCTION_DECL
+
+  INLINE(bool IsNullOrUndefined() const);
+#endif
+
 #define DECL_STRUCT_PREDICATE(NAME, Name, name) INLINE(bool Is##Name() const);
   STRUCT_LIST(DECL_STRUCT_PREDICATE)
 #undef DECL_STRUCT_PREDICATE
@@ -2058,6 +2100,8 @@ class JSReceiver: public HeapObject {
  public:
   // Returns true if there is no slow (ie, dictionary) backing store.
   inline bool HasFastProperties() const;
+
+  inline Isolate* GetIsolate() const;
 
   // Returns the properties array backing store if it
   // exists. Otherwise, returns an empty_property_array when there's a
@@ -3950,16 +3994,23 @@ class AllocationSite: public Struct {
   static bool ShouldTrack(ElementsKind from, ElementsKind to);
   static inline bool CanTrack(InstanceType type);
 
-  static const int kTransitionInfoOrBoilerplateOffset = HeapObject::kHeaderSize;
-  static const int kNestedSiteOffset =
-      kTransitionInfoOrBoilerplateOffset + kPointerSize;
-  static const int kPretenureDataOffset = kNestedSiteOffset + kPointerSize;
-  static const int kPretenureCreateCountOffset =
-      kPretenureDataOffset + kPointerSize;
-  static const int kDependentCodeOffset =
-      kPretenureCreateCountOffset + kPointerSize;
-  static const int kWeakNextOffset = kDependentCodeOffset + kPointerSize;
-  static const int kSize = kWeakNextOffset + kPointerSize;
+// Layout description.
+#define ALLOCATION_SITE_FIELDS(V)                     \
+  V(kTransitionInfoOrBoilerplateOffset, kPointerSize) \
+  V(kNestedSiteOffset, kPointerSize)                  \
+  V(kPretenureDataOffset, kPointerSize)               \
+  V(kPretenureCreateCountOffset, kPointerSize)        \
+  V(kDependentCodeOffset, kPointerSize)               \
+  /* Size of AllocationSite without WeakNext field */ \
+  V(kSizeWithoutWeakNext, 0)                          \
+  V(kWeakNextOffset, kPointerSize)                    \
+  /* Size of AllocationSite with WeakNext field */    \
+  V(kSizeWithWeakNext, 0)
+
+  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, ALLOCATION_SITE_FIELDS)
+
+  // Need KSize to statisfy Struct Macro gen machineary
+  static const int kSize = kSizeWithWeakNext;
 
   // During mark compact we need to take special care for the dependent code
   // field.

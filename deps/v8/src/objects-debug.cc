@@ -132,6 +132,7 @@ void HeapObject::HeapObjectVerify() {
       CallHandlerInfo::cast(this)->CallHandlerInfoVerify();
       break;
     case HASH_TABLE_TYPE:
+    case EPHEMERON_HASH_TABLE_TYPE:
     case BOILERPLATE_DESCRIPTION_TYPE:
     case FIXED_ARRAY_TYPE:
     case SCOPE_INFO_TYPE:
@@ -336,6 +337,10 @@ void HeapObject::HeapObjectVerify() {
     break;
     STRUCT_LIST(MAKE_STRUCT_CASE)
 #undef MAKE_STRUCT_CASE
+
+    case ALLOCATION_SITE_TYPE:
+      AllocationSite::cast(this)->AllocationSiteVerify();
+      break;
 
     case LOAD_HANDLER_TYPE:
       LoadHandler::cast(this)->LoadHandlerVerify();
@@ -1186,7 +1191,7 @@ void JSWeakMap::JSWeakMapVerify() {
   CHECK(IsJSWeakMap());
   JSObjectVerify();
   VerifyHeapPointer(table());
-  CHECK(table()->IsHashTable() || table()->IsUndefined(GetIsolate()));
+  CHECK(table()->IsEphemeronHashTable() || table()->IsUndefined(GetIsolate()));
 }
 
 void JSArrayIterator::JSArrayIteratorVerify() {
@@ -1227,7 +1232,7 @@ void JSWeakSet::JSWeakSetVerify() {
   CHECK(IsJSWeakSet());
   JSObjectVerify();
   VerifyHeapPointer(table());
-  CHECK(table()->IsHashTable() || table()->IsUndefined(GetIsolate()));
+  CHECK(table()->IsEphemeronHashTable() || table()->IsUndefined(GetIsolate()));
 }
 
 void Microtask::MicrotaskVerify() { CHECK(IsMicrotask()); }
@@ -1626,8 +1631,10 @@ void WasmExportedFunctionData::WasmExportedFunctionDataVerify() {
   VerifySmiField(kFunctionIndexOffset);
 }
 
-void WasmSharedModuleData::WasmSharedModuleDataVerify() {
-  CHECK(IsWasmSharedModuleData());
+void WasmModuleObject::WasmModuleObjectVerify() {
+  CHECK(IsWasmModuleObject());
+  VerifyObjectField(kCompiledModuleOffset);
+  VerifyObjectField(kExportWrappersOffset);
   VerifyObjectField(kManagedModuleOffset);
   CHECK(managed_module()->IsForeign());
   VerifyObjectField(kModuleBytesOffset);

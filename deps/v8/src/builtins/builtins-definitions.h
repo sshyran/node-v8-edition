@@ -120,9 +120,9 @@ namespace internal {
   ASM(InterpreterOnStackReplacement)                                           \
                                                                                \
   /* Code life-cycle */                                                        \
-  ASM(CompileLazy)                                                             \
-  ASM(CompileLazyDeoptimizedCode)                                              \
-  ASM(DeserializeLazy)                                                         \
+  TFC(CompileLazy, ConstructTrampoline, 1)                                     \
+  TFC(CompileLazyDeoptimizedCode, ConstructTrampoline, 1)                      \
+  TFC(DeserializeLazy, ConstructTrampoline, 1)                                 \
   ASM(InstantiateAsmJs)                                                        \
   ASM(NotifyDeoptimized)                                                       \
                                                                                \
@@ -159,8 +159,8 @@ namespace internal {
   API(HandleApiCallAsConstructor)                                              \
                                                                                \
   /* Adapters for Turbofan into runtime */                                     \
-  ASM(AllocateInNewSpace)                                                      \
-  ASM(AllocateInOldSpace)                                                      \
+  TFC(AllocateInNewSpace, Allocate, 1)                                         \
+  TFC(AllocateInOldSpace, Allocate, 1)                                         \
                                                                                \
   /* TurboFan support builtins */                                              \
   TFS(CopyFastSmiOrObjectElements, kObject)                                    \
@@ -235,8 +235,8 @@ namespace internal {
   TFJ(ReturnReceiver, 0)                                                       \
                                                                                \
   /* Array */                                                                  \
-  ASM(ArrayConstructor)                                                        \
-  ASM(ArrayConstructorImpl)                                                    \
+  TFC(ArrayConstructor, ConstructTrampoline, 1)                                \
+  TFC(ArrayConstructorImpl, ArrayConstructor, 1)                               \
   TFC(ArrayNoArgumentConstructor_PackedSmi_DontOverride,                       \
       ArrayNoArgumentConstructor, 1)                                           \
   TFC(ArrayNoArgumentConstructor_HoleySmi_DontOverride,                        \
@@ -269,7 +269,7 @@ namespace internal {
       ArraySingleArgumentConstructor, 1)                                       \
   TFC(ArraySingleArgumentConstructor_HoleyDouble_DisableAllocationSites,       \
       ArraySingleArgumentConstructor, 1)                                       \
-  ASM(ArrayNArgumentsConstructor)                                              \
+  TFC(ArrayNArgumentsConstructor, ArrayNArgumentsConstructor, 1)               \
   ASM(InternalArrayConstructor)                                                \
   ASM(InternalArrayConstructorImpl)                                            \
   TFC(InternalArrayNoArgumentConstructor_Packed, ArrayNoArgumentConstructor,   \
@@ -947,6 +947,7 @@ namespace internal {
   TFJ(RegExpPrototypeStickyGetter, 0)                                          \
   /* ES #sec-regexp.prototype.test */                                          \
   TFJ(RegExpPrototypeTest, 1, kString)                                         \
+  TFS(RegExpPrototypeTestFast, kReceiver, kString)                             \
   CPP(RegExpPrototypeToString)                                                 \
   /* ES #sec-get-regexp.prototype.unicode */                                   \
   TFJ(RegExpPrototypeUnicodeGetter, 0)                                         \
@@ -1103,6 +1104,8 @@ namespace internal {
   CPP(SymbolFor)                                                               \
   /* ES6 #sec-symbol.keyfor */                                                 \
   CPP(SymbolKeyFor)                                                            \
+  /* ES #sec-symbol.prototype.description */                                   \
+  TFJ(SymbolPrototypeDescriptionGetter, 0)                                     \
   /* ES6 #sec-symbol.prototype-@@toprimitive */                                \
   TFJ(SymbolPrototypeToPrimitive, 1, kHint)                                    \
   /* ES6 #sec-symbol.prototype.tostring */                                     \
@@ -1189,15 +1192,17 @@ namespace internal {
                                                                                \
   /* Wasm */                                                                   \
   ASM(WasmCompileLazy)                                                         \
-  TFC(WasmStackGuard, WasmRuntimeCall, 1)                                      \
-  TFC(ThrowWasmTrapUnreachable, WasmRuntimeCall, 1)                            \
-  TFC(ThrowWasmTrapMemOutOfBounds, WasmRuntimeCall, 1)                         \
-  TFC(ThrowWasmTrapDivByZero, WasmRuntimeCall, 1)                              \
-  TFC(ThrowWasmTrapDivUnrepresentable, WasmRuntimeCall, 1)                     \
-  TFC(ThrowWasmTrapRemByZero, WasmRuntimeCall, 1)                              \
-  TFC(ThrowWasmTrapFloatUnrepresentable, WasmRuntimeCall, 1)                   \
-  TFC(ThrowWasmTrapFuncInvalid, WasmRuntimeCall, 1)                            \
-  TFC(ThrowWasmTrapFuncSigMismatch, WasmRuntimeCall, 1)                        \
+  TFC(WasmArgumentsAdaptor, ArgumentAdaptor, 1)                                \
+  TFC(WasmCallJavaScript, CallTrampoline, 1)                                   \
+  TFS(WasmStackGuard)                                                          \
+  TFS(ThrowWasmTrapUnreachable)                                                \
+  TFS(ThrowWasmTrapMemOutOfBounds)                                             \
+  TFS(ThrowWasmTrapDivByZero)                                                  \
+  TFS(ThrowWasmTrapDivUnrepresentable)                                         \
+  TFS(ThrowWasmTrapRemByZero)                                                  \
+  TFS(ThrowWasmTrapFloatUnrepresentable)                                       \
+  TFS(ThrowWasmTrapFuncInvalid)                                                \
+  TFS(ThrowWasmTrapFuncSigMismatch)                                            \
                                                                                \
   /* WeakMap */                                                                \
   TFJ(WeakMapConstructor, SharedFunctionInfo::kDontAdaptArgumentsSentinel)     \

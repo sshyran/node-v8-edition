@@ -879,7 +879,7 @@ Maybe<bool> ValueSerializer::WriteWasmModule(Handle<WasmModuleObject> object) {
   WriteTag(SerializationTag::kWasmModule);
   WriteRawBytes(&encoding_tag, sizeof(encoding_tag));
 
-  Handle<String> wire_bytes(object->shared()->module_bytes(), isolate_);
+  Handle<String> wire_bytes(object->module_bytes(), isolate_);
   int wire_bytes_length = wire_bytes->length();
   WriteVarint<uint32_t>(wire_bytes_length);
   uint8_t* destination;
@@ -887,14 +887,15 @@ Maybe<bool> ValueSerializer::WriteWasmModule(Handle<WasmModuleObject> object) {
     String::WriteToFlat(*wire_bytes, destination, 0, wire_bytes_length);
   }
 
-  Handle<WasmCompiledModule> compiled_part(object->compiled_module(), isolate_);
+  wasm::NativeModule* native_module =
+      object->compiled_module()->GetNativeModule();
   size_t module_size =
-      wasm::GetSerializedNativeModuleSize(isolate_, compiled_part);
+      wasm::GetSerializedNativeModuleSize(isolate_, native_module);
   CHECK_GE(std::numeric_limits<uint32_t>::max(), module_size);
   WriteVarint<uint32_t>(static_cast<uint32_t>(module_size));
   uint8_t* module_buffer;
   if (ReserveRawBytes(module_size).To(&module_buffer)) {
-    if (!wasm::SerializeNativeModule(isolate_, compiled_part,
+    if (!wasm::SerializeNativeModule(isolate_, native_module,
                                      {module_buffer, module_size})) {
       return Nothing<bool>();
     }

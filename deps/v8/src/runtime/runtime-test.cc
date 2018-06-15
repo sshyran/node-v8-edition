@@ -531,7 +531,7 @@ RUNTIME_FUNCTION(Runtime_DebugPrint) {
   // MaybeObject*.
   MaybeObject* maybe_object = reinterpret_cast<MaybeObject*>(args[0]);
 
-  std::ostringstream os;
+  StdoutStream os;
   if (maybe_object->IsClearedWeakHeapObject()) {
     os << "[weak cleared]";
   } else {
@@ -577,9 +577,6 @@ RUNTIME_FUNCTION(Runtime_DebugPrint) {
   }
   os << std::endl;
 
-  // TODO(clemensh): Introduce an output stream which outputs to android log.
-  PrintF("%s", os.str().c_str());
-
   return args[0];  // return TOS
 }
 
@@ -620,13 +617,13 @@ RUNTIME_FUNCTION(Runtime_DebugTrackRetainingPath) {
     RetainingPathOption option = RetainingPathOption::kDefault;
     if (args.length() == 2) {
       CONVERT_ARG_HANDLE_CHECKED(String, str, 1);
-      const char track_ephemeral_path[] = "track-ephemeral-path";
-      if (str->IsOneByteEqualTo(STATIC_CHAR_VECTOR(track_ephemeral_path))) {
-        option = RetainingPathOption::kTrackEphemeralPath;
+      const char track_ephemeron_path[] = "track-ephemeron-path";
+      if (str->IsOneByteEqualTo(STATIC_CHAR_VECTOR(track_ephemeron_path))) {
+        option = RetainingPathOption::kTrackEphemeronPath;
       } else if (str->length() != 0) {
         PrintF("Unexpected second argument of DebugTrackRetainingPath.\n");
         PrintF("Expected an empty string or '%s', got '%s'.\n",
-               track_ephemeral_path, str->ToCString().get());
+               track_ephemeron_path, str->ToCString().get());
       }
     }
     isolate->heap()->AddRetainingPathTarget(object, option);
@@ -727,7 +724,7 @@ RUNTIME_FUNCTION(Runtime_DisassembleFunction) {
       !Compiler::Compile(func, Compiler::KEEP_EXCEPTION)) {
     return isolate->heap()->exception();
   }
-  OFStream os(stdout);
+  StdoutStream os;
   func->code()->Print(os);
   os << std::endl;
 #endif  // DEBUG
@@ -912,16 +909,16 @@ RUNTIME_FUNCTION(Runtime_SerializeWasmModule) {
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(WasmModuleObject, module_obj, 0);
 
-  Handle<WasmCompiledModule> compiled_module(module_obj->compiled_module(),
-                                             isolate);
+  wasm::NativeModule* native_module =
+      module_obj->compiled_module()->GetNativeModule();
   size_t compiled_size =
-      wasm::GetSerializedNativeModuleSize(isolate, compiled_module);
+      wasm::GetSerializedNativeModuleSize(isolate, native_module);
   void* array_data = isolate->array_buffer_allocator()->Allocate(compiled_size);
   Handle<JSArrayBuffer> array_buffer = isolate->factory()->NewJSArrayBuffer();
   JSArrayBuffer::Setup(array_buffer, isolate, false, array_data, compiled_size);
   if (!array_data ||
       !wasm::SerializeNativeModule(
-          isolate, compiled_module,
+          isolate, native_module,
           {reinterpret_cast<uint8_t*>(array_data), compiled_size})) {
     return isolate->heap()->undefined_value();
   }
@@ -1053,9 +1050,14 @@ RUNTIME_FUNCTION(Runtime_IsLiftoffFunction) {
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
   CHECK(WasmExportedFunction::IsWasmExportedFunction(*function));
-  wasm::WasmCode* wasm_code =
-      WasmExportedFunction::cast(*function)->GetWasmCode();
-  return isolate->heap()->ToBoolean(wasm_code->is_liftoff());
+  Handle<WasmExportedFunction> exp_fun =
+      Handle<WasmExportedFunction>::cast(function);
+  wasm::NativeModule* native_module =
+      exp_fun->instance()->compiled_module()->GetNativeModule();
+  uint32_t func_index = exp_fun->function_index();
+  return isolate->heap()->ToBoolean(
+      native_module->has_code(func_index) &&
+      native_module->code(func_index)->is_liftoff());
 }
 
 RUNTIME_FUNCTION(Runtime_CompleteInobjectSlackTracking) {
@@ -1075,6 +1077,14 @@ RUNTIME_FUNCTION(Runtime_FreezeWasmLazyCompilation) {
 
   instance->compiled_module()->GetNativeModule()->set_lazy_compile_frozen(true);
   return isolate->heap()->undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_WasmMemoryHasFullGuardRegion) {
+  DCHECK_EQ(1, args.length());
+  DisallowHeapAllocation no_gc;
+  CONVERT_ARG_CHECKED(WasmMemoryObject, memory, 0);
+
+  return isolate->heap()->ToBoolean(memory->has_full_guard_region(isolate));
 }
 
 }  // namespace internal

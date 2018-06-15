@@ -262,7 +262,7 @@ class ExternalReference BASE_EMBEDDED {
   static ExternalReference Create(const Runtime::Function* f);
   static ExternalReference Create(IsolateAddressId id, Isolate* isolate);
   static ExternalReference Create(Runtime::FunctionId id);
-  static ExternalReference Create(Address address);
+  static V8_EXPORT_PRIVATE ExternalReference Create(Address address);
 
   template <typename SubjectChar, typename PatternChar>
   static ExternalReference search_string_raw();
@@ -284,6 +284,11 @@ class ExternalReference BASE_EMBEDDED {
   runtime_function_table_address_for_unittests(Isolate* isolate);
 
   Address address() const { return address_; }
+
+  // An address is addressable through kRootRegister if it is located within
+  // [isolate, roots_ + root_register_addressable_end_offset[.
+  bool IsAddressableThroughRootRegister(Isolate* isolate) const;
+  intptr_t OffsetFromRootRegister(Isolate* isolate) const;
 
  private:
   explicit ExternalReference(Address address) : address_(address) {}

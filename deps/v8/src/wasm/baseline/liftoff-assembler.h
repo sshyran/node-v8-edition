@@ -14,6 +14,7 @@
 #include "src/wasm/baseline/liftoff-assembler-defs.h"
 #include "src/wasm/baseline/liftoff-register.h"
 #include "src/wasm/function-body-decoder.h"
+#include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-opcodes.h"
 #include "src/wasm/wasm-value.h"
@@ -540,11 +541,11 @@ class LiftoffAssembler : public TurboAssembler {
                     int stack_bytes, ExternalReference ext_ref);
 
   inline void CallNativeWasmCode(Address addr);
-  inline void CallRuntime(Zone* zone, Runtime::FunctionId fid);
   // Indirect call: If {target == no_reg}, then pop the target from the stack.
   inline void CallIndirect(wasm::FunctionSig* sig,
                            compiler::CallDescriptor* call_descriptor,
                            Register target);
+  inline void CallRuntimeStub(WasmCode::RuntimeStubId sid);
 
   // Reserve space in the current frame, store address to space in {addr}.
   inline void AllocateStackSlot(Register addr, uint32_t size);

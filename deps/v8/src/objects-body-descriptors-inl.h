@@ -364,11 +364,9 @@ class PrototypeInfo::BodyDescriptor final : public BodyDescriptorBase {
   }
 };
 
-template <JSWeakCollection::BodyVisitingPolicy body_visiting_policy>
 class JSWeakCollection::BodyDescriptorImpl final : public BodyDescriptorBase {
  public:
-  STATIC_ASSERT(kTableOffset + kPointerSize == kNextOffset);
-  STATIC_ASSERT(kNextOffset + kPointerSize == kSize);
+  STATIC_ASSERT(kTableOffset + kPointerSize == kSize);
 
   static bool IsValidSlot(Map* map, HeapObject* obj, int offset) {
     return IsValidSlotImpl(map, obj, offset);
@@ -377,12 +375,7 @@ class JSWeakCollection::BodyDescriptorImpl final : public BodyDescriptorBase {
   template <typename ObjectVisitor>
   static inline void IterateBody(Map* map, HeapObject* obj, int object_size,
                                  ObjectVisitor* v) {
-    if (body_visiting_policy == kIgnoreWeakness) {
-      IterateBodyImpl(map, obj, kPropertiesOrHashOffset, object_size, v);
-    } else {
-      IteratePointers(obj, kPropertiesOrHashOffset, kTableOffset, v);
-      IterateBodyImpl(map, obj, kSize, object_size, v);
-    }
+    IterateBodyImpl(map, obj, kPropertiesOrHashOffset, object_size, v);
   }
 
   static inline int SizeOf(Map* map, HeapObject* object) {
@@ -602,6 +595,7 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
     case FIXED_ARRAY_TYPE:
     case BOILERPLATE_DESCRIPTION_TYPE:
     case HASH_TABLE_TYPE:
+    case EPHEMERON_HASH_TABLE_TYPE:
     case SCOPE_INFO_TYPE:
     case BLOCK_CONTEXT_TYPE:
     case CATCH_CONTEXT_TYPE:
@@ -734,14 +728,13 @@ ReturnType BodyDescriptorApply(InstanceType type, T1 p1, T2 p2, T3 p3, T4 p4) {
       return Op::template apply<SharedFunctionInfo::BodyDescriptor>(p1, p2, p3,
                                                                     p4);
     }
+    case ALLOCATION_SITE_TYPE:
+      return Op::template apply<AllocationSite::BodyDescriptor>(p1, p2, p3, p4);
 
 #define MAKE_STRUCT_CASE(NAME, Name, name) case NAME##_TYPE:
       STRUCT_LIST(MAKE_STRUCT_CASE)
 #undef MAKE_STRUCT_CASE
-      if (type == ALLOCATION_SITE_TYPE) {
-        return Op::template apply<AllocationSite::BodyDescriptor>(p1, p2, p3,
-                                                                  p4);
-      } else if (type == PROTOTYPE_INFO_TYPE) {
+      if (type == PROTOTYPE_INFO_TYPE) {
         return Op::template apply<PrototypeInfo::BodyDescriptor>(p1, p2, p3,
                                                                  p4);
       } else {

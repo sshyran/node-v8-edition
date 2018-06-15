@@ -10,6 +10,7 @@
 #include "src/bootstrapper.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
+#include "src/instruction-stream.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/objects-inl.h"
 #include "src/objects/debug-objects-inl.h"
@@ -17,6 +18,7 @@
 #include "src/objects/js-locale-inl.h"
 #endif  // V8_INTL_SUPPORT
 #include "src/objects/arguments-inl.h"
+#include "src/objects/hash-table-inl.h"
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/js-regexp-string-iterator-inl.h"
@@ -36,7 +38,7 @@ namespace internal {
 #ifdef OBJECT_PRINT
 
 void Object::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   this->Print(os);
   os << std::flush;
 }
@@ -97,7 +99,6 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case FIXED_DOUBLE_ARRAY_TYPE:
       FixedDoubleArray::cast(this)->FixedDoubleArrayPrint(os);
       break;
-    case HASH_TABLE_TYPE:
     case FIXED_ARRAY_TYPE:
     case BLOCK_CONTEXT_TYPE:
     case CATCH_CONTEXT_TYPE:
@@ -109,6 +110,12 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case SCRIPT_CONTEXT_TYPE:
     case WITH_CONTEXT_TYPE:
       FixedArray::cast(this)->FixedArrayPrint(os);
+      break;
+    case HASH_TABLE_TYPE:
+      ObjectHashTable::cast(this)->ObjectHashTablePrint(os);
+      break;
+    case EPHEMERON_HASH_TABLE_TYPE:
+      EphemeronHashTable::cast(this)->EphemeronHashTablePrint(os);
       break;
     case BOILERPLATE_DESCRIPTION_TYPE:
       BoilerplateDescription::cast(this)->BoilerplateDescriptionPrint(os);
@@ -280,6 +287,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
   STRUCT_LIST(MAKE_STRUCT_CASE)
 #undef MAKE_STRUCT_CASE
 
+    case ALLOCATION_SITE_TYPE:
+      AllocationSite::cast(this)->AllocationSitePrint(os);
+      break;
     case LOAD_HANDLER_TYPE:
       LoadHandler::cast(this)->LoadHandlerPrint(os);
       break;
@@ -822,6 +832,23 @@ void PrintFixedArrayWithHeader(std::ostream& os, FixedArray* array,
 }
 
 template <typename T>
+void PrintHashTableWithHeader(std::ostream& os, T* table, const char* type) {
+  table->PrintHeader(os, type);
+  os << "\n - length: " << table->length();
+  os << "\n - elements: " << table->NumberOfElements();
+  os << "\n - deleted: " << table->NumberOfDeletedElements();
+  os << "\n - capacity: " << table->Capacity();
+
+  os << "\n - elements: {";
+  for (int i = 0; i < table->Capacity(); i++) {
+    os << '\n'
+       << std::setw(12) << i << ": " << Brief(table->KeyAt(i)) << " -> "
+       << Brief(table->ValueAt(i));
+  }
+  os << "\n }\n";
+}
+
+template <typename T>
 void PrintWeakArrayElements(std::ostream& os, T* array) {
   // Print in array notation for non-sparse arrays.
   MaybeObject* previous_value = array->length() > 0 ? array->Get(0) : nullptr;
@@ -863,8 +890,15 @@ void PrintWeakArrayListWithHeader(std::ostream& os, WeakArrayList* array) {
 }  // namespace
 
 void FixedArray::FixedArrayPrint(std::ostream& os) {  // NOLINT
-  PrintFixedArrayWithHeader(os, this,
-                            IsHashTable() ? "HashTable" : "FixedArray");
+  PrintFixedArrayWithHeader(os, this, "FixedArray");
+}
+
+void ObjectHashTable::ObjectHashTablePrint(std::ostream& os) {
+  PrintHashTableWithHeader(os, this, "ObjectHashTable");
+}
+
+void EphemeronHashTable::EphemeronHashTablePrint(std::ostream& os) {
+  PrintHashTableWithHeader(os, this, "EphemeronHashTable");
 }
 
 void BoilerplateDescription::BoilerplateDescriptionPrint(std::ostream& os) {
@@ -921,7 +955,7 @@ void FeedbackCell::FeedbackCellPrint(std::ostream& os) {  // NOLINT
 }
 
 void FeedbackVectorSpec::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
 
   FeedbackVectorSpecPrint(os);
 
@@ -947,7 +981,7 @@ void FeedbackVectorSpec::FeedbackVectorSpecPrint(std::ostream& os) {  // NOLINT
 }
 
 void FeedbackMetadata::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   FeedbackMetadataPrint(os);
   os << std::flush;
 }
@@ -966,7 +1000,7 @@ void FeedbackMetadata::FeedbackMetadataPrint(std::ostream& os) {
 }
 
 void FeedbackVector::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   FeedbackVectorPrint(os);
   os << std::flush;
 }
@@ -1325,7 +1359,9 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {  // NOLINT
   shared()->PrintSourceCode(os);
   JSObjectPrintBody(os, this);
   os << "\n - feedback vector: ";
-  if (has_feedback_vector()) {
+  if (!shared()->HasFeedbackMetadata()) {
+    os << "feedback metadata is not available in SFI\n";
+  } else if (has_feedback_vector()) {
     feedback_vector()->FeedbackVectorPrint(os);
   } else {
     os << "not available\n";
@@ -1732,9 +1768,9 @@ void WasmExportedFunctionData::WasmExportedFunctionDataPrint(
   os << "\n";
 }
 
-void WasmSharedModuleData::WasmSharedModuleDataPrint(
-    std::ostream& os) {  // NOLINT
-  HeapObject::PrintHeader(os, "WasmSharedModuleData");
+void WasmModuleObject::WasmModuleObjectPrint(std::ostream& os) {  // NOLINT
+  JSObjectPrintHeader(os, this, "WasmModuleObject");
+  JSObjectPrintBody(os, this);
   os << "\n - module: " << module();
   os << "\n";
 }
@@ -2039,7 +2075,7 @@ static void PrintBitMask(std::ostream& os, uint32_t value) {  // NOLINT
 
 
 void LayoutDescriptor::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   this->Print(os);
   os << std::flush;
 }
@@ -2088,7 +2124,7 @@ void InterpreterData::InterpreterDataPrint(std::ostream& os) {  // NOLINT
 }
 
 void MaybeObject::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   this->Print(os);
   os << std::flush;
 }
@@ -2210,7 +2246,7 @@ char* String::ToAsciiArray() {
 }
 
 void DescriptorArray::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   this->PrintDescriptors(os);
   os << std::flush;
 }
@@ -2249,7 +2285,7 @@ void TransitionsAccessor::PrintOneTransition(std::ostream& os, Name* key,
 }
 
 void TransitionArray::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   Print(os);
 }
 
@@ -2282,7 +2318,7 @@ void TransitionsAccessor::PrintTransitions(std::ostream& os) {  // NOLINT
 }
 
 void TransitionsAccessor::PrintTransitionTree() {
-  OFStream os(stdout);
+  StdoutStream os;
   os << "map= " << Brief(map_);
   DisallowHeapAllocation no_gc;
   PrintTransitionTree(os, 0, &no_gc);
@@ -2358,15 +2394,17 @@ extern void _v8_internal_Print_Code(void* object) {
   i::wasm::WasmCode* wasm_code =
       isolate->wasm_engine()->code_manager()->LookupCode(address);
   if (wasm_code) {
-    i::OFStream os(stdout);
+    i::StdoutStream os;
     wasm_code->Disassemble(nullptr, isolate, os, address);
     return;
   }
 
   if (!isolate->heap()->InSpaceSlow(address, i::CODE_SPACE) &&
-      !isolate->heap()->InSpaceSlow(address, i::LO_SPACE)) {
+      !isolate->heap()->InSpaceSlow(address, i::LO_SPACE) &&
+      !i::InstructionStream::PcIsOffHeap(isolate, address)) {
     i::PrintF(
-        "%p is not within the current isolate's large object or code spaces\n",
+        "%p is not within the current isolate's large object, code or embedded "
+        "spaces\n",
         object);
     return;
   }
@@ -2377,7 +2415,7 @@ extern void _v8_internal_Print_Code(void* object) {
     return;
   }
 #ifdef ENABLE_DISASSEMBLER
-  i::OFStream os(stdout);
+  i::StdoutStream os;
   code->Disassemble(nullptr, os, address);
 #else   // ENABLE_DISASSEMBLER
   code->Print();

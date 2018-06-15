@@ -67,14 +67,9 @@ class FileVisitor {
     return std::string("p_") + name;
   }
 
-  Callable* LookupCall(const std::string& name,
-                       const TypeVector& parameter_types);
+  Callable* LookupCall(const std::string& name, const Arguments& arguments);
 
-  Signature MakeSignature(CallableNode* decl,
-                          const CallableNodeSignature* signature);
-
-  std::string GetGeneratedCallableName(const std::string& name,
-                                       const TypeVector& specialized_types);
+  Signature MakeSignature(const CallableNodeSignature* signature);
 
   struct PendingSpecialization {
     SpecializationKey key;

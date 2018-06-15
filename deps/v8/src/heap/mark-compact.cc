@@ -781,7 +781,6 @@ void MarkCompactCollector::Prepare() {
     FinishConcurrentMarking(ConcurrentMarking::StopRequest::PREEMPT_TASKS);
     heap()->incremental_marking()->Deactivate();
     ClearMarkbits();
-    AbortWeakCollections();
     AbortWeakObjects();
     AbortCompaction();
     heap_->local_embedder_heap_tracer()->AbortTracing();
@@ -832,9 +831,11 @@ void MarkCompactCollector::VerifyMarking() {
   }
 #endif
 #ifdef VERIFY_HEAP
-  heap()->old_space()->VerifyLiveBytes();
-  heap()->map_space()->VerifyLiveBytes();
-  heap()->code_space()->VerifyLiveBytes();
+  if (FLAG_verify_heap) {
+    heap()->old_space()->VerifyLiveBytes();
+    heap()->map_space()->VerifyLiveBytes();
+    heap()->code_space()->VerifyLiveBytes();
+  }
 #endif
 }
 
@@ -959,7 +960,7 @@ class InternalizedStringTableCleaner : public ObjectVisitor {
         } else {
           // StringTable contains only old space strings.
           DCHECK(!heap_->InNewSpace(o));
-          MarkCompactCollector::RecordSlot(table_, p, o);
+          MarkCompactCollector::RecordSlot(table_, p, heap_object);
         }
       }
     }
@@ -1427,14 +1428,12 @@ class EvacuateRecordOnlyVisitor final : public HeapObjectVisitor {
   Heap* heap_;
 };
 
-bool MarkCompactCollector::IsUnmarkedHeapObject(Object** p) {
+bool MarkCompactCollector::IsUnmarkedHeapObject(Heap* heap, Object** p) {
   Object* o = *p;
   if (!o->IsHeapObject()) return false;
   HeapObject* heap_object = HeapObject::cast(o);
-  return heap_object->GetHeap()
-      ->mark_compact_collector()
-      ->non_atomic_marking_state()
-      ->IsWhite(HeapObject::cast(o));
+  return heap->mark_compact_collector()->non_atomic_marking_state()->IsWhite(
+      heap_object);
 }
 
 void MarkCompactCollector::MarkStringTable(
@@ -1458,6 +1457,18 @@ void MarkCompactCollector::MarkRoots(RootVisitor* root_visitor,
   ProcessTopOptimizedFrame(custom_root_body_visitor);
 }
 
+void MarkCompactCollector::ProcessMarkingWorklistInParallel() {
+  if (FLAG_parallel_marking) {
+    DCHECK(FLAG_concurrent_marking);
+    heap_->concurrent_marking()->RescheduleTasksIfNeeded();
+  }
+  ProcessMarkingWorklist();
+
+  FinishConcurrentMarking(
+      ConcurrentMarking::StopRequest::COMPLETE_ONGOING_TASKS);
+  ProcessMarkingWorklist();
+}
+
 void MarkCompactCollector::ProcessMarkingWorklist() {
   HeapObject* object;
   MarkCompactMarkingVisitor visitor(this, marking_state());
@@ -1474,7 +1485,7 @@ void MarkCompactCollector::ProcessMarkingWorklist() {
   DCHECK(marking_worklist()->IsBailoutEmpty());
 }
 
-void MarkCompactCollector::ProcessEphemeralMarking() {
+void MarkCompactCollector::ProcessEphemeronMarking() {
   DCHECK(marking_worklist()->IsEmpty());
   bool work_to_do = true;
   while (work_to_do) {
@@ -1485,9 +1496,18 @@ void MarkCompactCollector::ProcessEphemeralMarking() {
           0, EmbedderHeapTracer::AdvanceTracingActions(
                  EmbedderHeapTracer::ForceCompletionAction::FORCE_COMPLETION));
     }
-    ProcessWeakCollections();
+    {
+      TRACE_GC(heap()->tracer(),
+               GCTracer::Scope::MC_MARK_WEAK_CLOSURE_EPHEMERON_VISITING);
+      ProcessWeakCollections();
+    }
     work_to_do = !marking_worklist()->IsEmpty();
-    ProcessMarkingWorklist();
+
+    {
+      TRACE_GC(heap()->tracer(),
+               GCTracer::Scope::MC_MARK_WEAK_CLOSURE_EPHEMERON_MARKING);
+      ProcessMarkingWorklistInParallel();
+    }
   }
   CHECK(marking_worklist()->IsEmpty());
   CHECK_EQ(0, heap()->local_embedder_heap_tracer()->NumberOfWrappersToTrace());
@@ -1568,7 +1588,7 @@ void MarkCompactCollector::MarkLiveObjects() {
 
   {
     TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_MARK_MAIN);
-    if (FLAG_parallel_marking) {
+    if (FLAG_parallel_marking && FLAG_parallel_ephemeron_marking) {
       DCHECK(FLAG_concurrent_marking);
       heap_->concurrent_marking()->RescheduleTasksIfNeeded();
     }
@@ -1589,8 +1609,8 @@ void MarkCompactCollector::MarkLiveObjects() {
     // harmony weak maps.
     {
       TRACE_GC(heap()->tracer(),
-               GCTracer::Scope::MC_MARK_WEAK_CLOSURE_EPHEMERAL);
-      ProcessEphemeralMarking();
+               GCTracer::Scope::MC_MARK_WEAK_CLOSURE_EPHEMERON);
+      ProcessEphemeronMarking();
       DCHECK(marking_worklist()->IsEmpty());
     }
 
@@ -1619,10 +1639,10 @@ void MarkCompactCollector::MarkLiveObjects() {
       ProcessMarkingWorklist();
     }
 
-    // Repeat ephemeral processing from the newly marked objects.
+    // Repeat ephemeron processing from the newly marked objects.
     {
       TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_MARK_WEAK_CLOSURE_HARMONY);
-      ProcessEphemeralMarking();
+      ProcessEphemeronMarking();
       {
         TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_MARK_WRAPPER_EPILOGUE);
         heap()->local_embedder_heap_tracer()->TraceEpilogue();
@@ -1854,67 +1874,128 @@ void MarkCompactCollector::TrimEnumCache(Map* map,
   heap_->RightTrimFixedArray(indices, to_trim);
 }
 
-void MarkCompactCollector::ProcessWeakCollections() {
-  MarkCompactMarkingVisitor visitor(this, marking_state());
-  Object* weak_collection_obj = heap()->encountered_weak_collections();
-  while (weak_collection_obj != Smi::kZero) {
-    JSWeakCollection* weak_collection =
-        reinterpret_cast<JSWeakCollection*>(weak_collection_obj);
-    DCHECK(non_atomic_marking_state()->IsBlackOrGrey(weak_collection));
-    if (weak_collection->table()->IsHashTable()) {
-      ObjectHashTable* table = ObjectHashTable::cast(weak_collection->table());
-      for (int i = 0; i < table->Capacity(); i++) {
-        HeapObject* heap_object = HeapObject::cast(table->KeyAt(i));
-        if (non_atomic_marking_state()->IsBlackOrGrey(heap_object)) {
+class EphemeronHashTableMarkingItem : public ItemParallelJob::Item {
+ public:
+  explicit EphemeronHashTableMarkingItem(EphemeronHashTable* table, int offset)
+      : table_(table), offset_(offset) {}
+  virtual ~EphemeronHashTableMarkingItem() {}
+  EphemeronHashTable* table() const { return table_; }
+  int offset() const { return offset_; }
+
+ private:
+  EphemeronHashTable* table_;
+  int offset_;
+};
+
+class EphemeronHashTableMarkingTask : public ItemParallelJob::Task {
+ public:
+  EphemeronHashTableMarkingTask(
+      Isolate* isolate, MarkCompactCollector* collector,
+      MarkCompactCollector::MarkingWorklist::ConcurrentMarkingWorklist*
+          worklist,
+      int task_id)
+      : ItemParallelJob::Task(isolate),
+        collector_(collector),
+        worklist_(worklist),
+        task_id_(task_id) {}
+
+  void RunInParallel() override {
+    EphemeronHashTableMarkingItem* item = nullptr;
+    while ((item = GetItem<EphemeronHashTableMarkingItem>()) != nullptr) {
+      EphemeronHashTable* table = item->table();
+      int start = item->offset();
+      int limit = Min(start + MarkCompactCollector::kEphemeronChunkSize,
+                      table->Capacity());
+
+      for (int i = start; i < limit; i++) {
+        HeapObject* key = HeapObject::cast(table->KeyAt(i));
+        if (collector_->marking_state()->IsBlackOrGrey(key)) {
           Object** key_slot =
-              table->RawFieldOfElementAt(ObjectHashTable::EntryToIndex(i));
-          RecordSlot(table, key_slot, *key_slot);
-          Object** value_slot =
-              table->RawFieldOfElementAt(ObjectHashTable::EntryToValueIndex(i));
-          if (V8_UNLIKELY(FLAG_track_retaining_path) &&
-              (*value_slot)->IsHeapObject()) {
-            heap()->AddEphemeralRetainer(heap_object,
-                                         HeapObject::cast(*value_slot));
+              table->RawFieldOfElementAt(EphemeronHashTable::EntryToIndex(i));
+          collector_->RecordSlot(table, key_slot, key);
+          Object** value_slot = table->RawFieldOfElementAt(
+              EphemeronHashTable::EntryToValueIndex(i));
+          Object* value_obj = *value_slot;
+
+          if (value_obj->IsHeapObject()) {
+            HeapObject* value = HeapObject::cast(value_obj);
+            collector_->RecordSlot(table, value_slot, value);
+
+            if (collector_->marking_state()->WhiteToGrey(value)) {
+              worklist_->Push(task_id_, value);
+
+              if (V8_UNLIKELY(FLAG_track_retaining_path)) {
+                collector_->heap()->AddEphemeronRetainer(key, value);
+                collector_->heap()->AddRetainer(table, value);
+              }
+            }
           }
-          visitor.VisitPointer(table, value_slot);
         }
       }
+
+      item->MarkFinished();
     }
-    weak_collection_obj = weak_collection->next();
+
+    worklist_->FlushToGlobal(task_id_);
   }
+
+ private:
+  MarkCompactCollector* collector_;
+  MarkCompactCollector::MarkingWorklist::ConcurrentMarkingWorklist* worklist_;
+  int task_id_;
+};
+
+void MarkCompactCollector::ProcessWeakCollections() {
+  CHECK(heap()->concurrent_marking()->IsStopped());
+  ItemParallelJob marking_job(isolate()->cancelable_task_manager(),
+                              &page_parallel_job_semaphore_);
+  size_t elements = 0;
+
+  // Split EphemeronHashTables into chunks such that we can divide work more
+  // equally between tasks
+  weak_objects_.ephemeron_hash_tables.Iterate([&](EphemeronHashTable* table) {
+    int capacity = table->Capacity();
+    int chunks = (capacity + kEphemeronChunkSize - 1) / kEphemeronChunkSize;
+    elements += static_cast<size_t>(capacity);
+
+    for (int i = 0; i < chunks; i++) {
+      marking_job.AddItem(
+          new EphemeronHashTableMarkingItem(table, i * kEphemeronChunkSize));
+    }
+  });
+
+  int num_tasks = NumberOfParallelEphemeronVisitingTasks(elements);
+  for (int i = 0; i < num_tasks; i++) {
+    marking_job.AddTask(new EphemeronHashTableMarkingTask(
+        isolate(), this, marking_worklist_.shared(), i));
+  }
+
+  marking_job.Run(isolate()->async_counters());
+}
+
+int MarkCompactCollector::NumberOfParallelEphemeronVisitingTasks(
+    size_t elements) {
+  DCHECK_GE(elements, 0);
+  if (!FLAG_parallel_ephemeron_visiting || elements == 0) return 1;
+  size_t chunks = (elements + kEphemeronChunkSize - 1) / kEphemeronChunkSize;
+  const size_t kMaxNumTasks =
+      MarkingWorklist::ConcurrentMarkingWorklist::kMaxNumTasks;
+  return Min(NumberOfAvailableCores(),
+             static_cast<int>(Min(chunks, kMaxNumTasks)));
 }
 
 void MarkCompactCollector::ClearWeakCollections() {
   TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_CLEAR_WEAK_COLLECTIONS);
-  Object* weak_collection_obj = heap()->encountered_weak_collections();
-  while (weak_collection_obj != Smi::kZero) {
-    JSWeakCollection* weak_collection =
-        reinterpret_cast<JSWeakCollection*>(weak_collection_obj);
-    DCHECK(non_atomic_marking_state()->IsBlackOrGrey(weak_collection));
-    if (weak_collection->table()->IsHashTable()) {
-      ObjectHashTable* table = ObjectHashTable::cast(weak_collection->table());
-      for (int i = 0; i < table->Capacity(); i++) {
-        HeapObject* key = HeapObject::cast(table->KeyAt(i));
-        if (!non_atomic_marking_state()->IsBlackOrGrey(key)) {
-          table->RemoveEntry(i);
-        }
+  EphemeronHashTable* table;
+
+  while (weak_objects_.ephemeron_hash_tables.Pop(kMainThread, &table)) {
+    for (int i = 0; i < table->Capacity(); i++) {
+      HeapObject* key = HeapObject::cast(table->KeyAt(i));
+      if (!non_atomic_marking_state()->IsBlackOrGrey(key)) {
+        table->RemoveEntry(i);
       }
     }
-    weak_collection_obj = weak_collection->next();
-    weak_collection->set_next(heap()->undefined_value());
   }
-  heap()->set_encountered_weak_collections(Smi::kZero);
-}
-
-void MarkCompactCollector::AbortWeakCollections() {
-  Object* weak_collection_obj = heap()->encountered_weak_collections();
-  while (weak_collection_obj != Smi::kZero) {
-    JSWeakCollection* weak_collection =
-        reinterpret_cast<JSWeakCollection*>(weak_collection_obj);
-    weak_collection_obj = weak_collection->next();
-    weak_collection->set_next(heap()->undefined_value());
-  }
-  heap()->set_encountered_weak_collections(Smi::kZero);
 }
 
 void MarkCompactCollector::ClearWeakCells() {
@@ -1939,9 +2020,9 @@ void MarkCompactCollector::ClearWeakCells() {
           // Resurrect the cell.
           non_atomic_marking_state()->WhiteToBlack(value);
           Object** slot = HeapObject::RawField(value, Cell::kValueOffset);
-          RecordSlot(value, slot, *slot);
+          RecordSlot(value, slot, HeapObject::cast(*slot));
           slot = HeapObject::RawField(weak_cell, WeakCell::kValueOffset);
-          RecordSlot(weak_cell, slot, *slot);
+          RecordSlot(weak_cell, slot, HeapObject::cast(*slot));
         } else {
           weak_cell->clear();
         }
@@ -1952,7 +2033,7 @@ void MarkCompactCollector::ClearWeakCells() {
     } else {
       // The value of the weak cell is alive.
       Object** slot = HeapObject::RawField(weak_cell, WeakCell::kValueOffset);
-      RecordSlot(weak_cell, slot, *slot);
+      RecordSlot(weak_cell, slot, HeapObject::cast(*slot));
     }
   }
 }
@@ -1982,6 +2063,7 @@ void MarkCompactCollector::ClearWeakReferences() {
 void MarkCompactCollector::AbortWeakObjects() {
   weak_objects_.weak_cells.Clear();
   weak_objects_.transition_arrays.Clear();
+  weak_objects_.ephemeron_hash_tables.Clear();
   weak_objects_.weak_references.Clear();
   weak_objects_.weak_objects_in_code.Clear();
 }
@@ -2016,7 +2098,7 @@ static inline SlotCallbackResult UpdateSlot(
     HeapObjectReferenceType reference_type) {
   MapWord map_word = heap_obj->map_word();
   if (map_word.IsForwardingAddress()) {
-    DCHECK(heap_obj->GetHeap()->InFromSpace(heap_obj) ||
+    DCHECK(Heap::InFromSpace(heap_obj) ||
            MarkCompactCollector::IsOnEvacuationCandidate(heap_obj) ||
            Page::FromAddress(heap_obj->address())
                ->IsFlagSet(Page::COMPACTION_WAS_ABORTED));
@@ -2029,7 +2111,7 @@ static inline SlotCallbackResult UpdateSlot(
     } else {
       base::AsAtomicPointer::Release_CompareAndSwap(slot, old, target);
     }
-    DCHECK(!heap_obj->GetHeap()->InFromSpace(target));
+    DCHECK(!Heap::InFromSpace(target));
     DCHECK(!MarkCompactCollector::IsOnEvacuationCandidate(target));
   }
   // OLD_TO_OLD slots are always removed after updating.
@@ -3499,7 +3581,9 @@ int MinorMarkCompactCollector::NumberOfParallelMarkingTasks(int pages) {
   // amount of marking that is required.
   const int kPagesPerTask = 2;
   const int wanted_tasks = Max(1, pages / kPagesPerTask);
-  return Min(NumberOfAvailableCores(), Min(wanted_tasks, kNumMarkers));
+  return Min(NumberOfAvailableCores(),
+             Min(wanted_tasks,
+                 MinorMarkCompactCollector::MarkingWorklist::kMaxNumTasks));
 }
 
 void MinorMarkCompactCollector::CleanupSweepToIteratePages() {
@@ -3630,7 +3714,6 @@ void MinorMarkCompactCollector::UpdatePointersAfterEvacuation() {
     // Update pointers from external string table.
     heap()->UpdateNewSpaceReferencesInExternalStringTable(
         &UpdateReferenceInExternalStringTableEntry);
-    heap()->IterateEncounteredWeakCollections(&updating_visitor);
   }
 }
 
@@ -4124,7 +4207,6 @@ void MinorMarkCompactCollector::MarkLiveObjects() {
   // Mark rest on the main thread.
   {
     TRACE_GC(heap()->tracer(), GCTracer::Scope::MINOR_MC_MARK_WEAK);
-    heap()->IterateEncounteredWeakCollections(&root_visitor);
     ProcessMarkingWorklist();
   }
 

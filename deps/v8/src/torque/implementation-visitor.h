@@ -64,13 +64,13 @@ class ImplementationVisitor : public FileVisitor {
                                         LocationReference reference) {
     Arguments arguments;
     arguments.parameters = {reference.base};
-    return GenerateOperation(std::string(".") + expr->field, arguments);
+    return GenerateCall(std::string(".") + expr->field, arguments);
   }
   VisitResult GenerateFetchFromLocation(ElementAccessExpression* expr,
                                         LocationReference reference) {
     Arguments arguments;
     arguments.parameters = {reference.base, reference.index};
-    return GenerateOperation("[]", arguments);
+    return GenerateCall("[]", arguments);
   }
 
   VisitResult GetBuiltinCode(Builtin* builtin);
@@ -82,10 +82,6 @@ class ImplementationVisitor : public FileVisitor {
   VisitResult Visit(ElementAccessExpression* expr) {
     return GenerateFetchFromLocation(expr, GetLocationReference(expr));
   }
-
-  VisitResult Visit(CastExpression* expr);
-  VisitResult Visit(UnsafeCastExpression* expr);
-  VisitResult Visit(ConvertExpression* expr);
 
   void Visit(ModuleDeclaration* decl);
   void Visit(DefaultModuleDeclaration* decl) {
@@ -144,6 +140,9 @@ class ImplementationVisitor : public FileVisitor {
   const Type* Visit(DebugStatement* stmt);
   const Type* Visit(AssertStatement* stmt);
 
+  void BeginModuleFile(Module* module);
+  void EndModuleFile(Module* module);
+
   void GenerateImplementation(const std::string& dir, Module* module);
 
  private:
@@ -196,7 +195,7 @@ class ImplementationVisitor : public FileVisitor {
   void GenerateParameterList(const NameVector& list, size_t first = 0);
 
   VisitResult GenerateCall(const std::string& callable_name,
-                           const Arguments& parameters, bool tail_call);
+                           Arguments parameters, bool tail_call = false);
   VisitResult GeneratePointerCall(Expression* callee,
                                   const Arguments& parameters, bool tail_call);
 
@@ -216,10 +215,6 @@ class ImplementationVisitor : public FileVisitor {
                                         const std::string& macro_prefix,
                                         Macro* macro);
 
-  VisitResult GenerateOperation(const std::string& operation,
-                                Arguments arguments,
-                                base::Optional<const Type*> return_type = {});
-
   VisitResult GenerateImplicitConvert(const Type* destination_type,
                                       VisitResult source);
 
@@ -227,7 +222,7 @@ class ImplementationVisitor : public FileVisitor {
                   const CallableNodeSignature* signature,
                   Statement* body) override {
     Declarations::GenericScopeActivator scope(declarations(), key);
-    Visit(callable, MakeSignature(callable, signature), body);
+    Visit(callable, MakeSignature(signature), body);
   }
 
   std::string NewTempVariable();

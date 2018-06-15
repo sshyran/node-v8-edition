@@ -15,6 +15,8 @@ namespace v8 {
 namespace internal {
 namespace torque {
 
+static constexpr const char* const kFromConstexprMacroName = "from_constexpr";
+
 class Declarations {
  public:
   Declarations()
@@ -58,13 +60,14 @@ class Declarations {
 
   Value* LookupValue(const std::string& name);
 
+  Macro* TryLookupMacro(const std::string& name, const TypeVector& types);
   Macro* LookupMacro(const std::string& name, const TypeVector& types);
 
   Builtin* LookupBuiltin(const std::string& name);
 
   Label* LookupLabel(const std::string& name);
 
-  Generic* LookupGeneric(const std::string& name);
+  GenericList* LookupGeneric(const std::string& name);
 
   const AbstractType* DeclareAbstractType(const std::string& name,
                                           const std::string& generated,
@@ -74,7 +77,8 @@ class Declarations {
 
   Label* DeclareLabel(const std::string& name);
 
-  Macro* DeclareMacro(const std::string& name, const Signature& signature);
+  Macro* DeclareMacro(const std::string& name, const Signature& signature,
+                      base::Optional<std::string> op = {});
 
   Builtin* DeclareBuiltin(const std::string& name, Builtin::Kind kind,
                           bool external, const Signature& signature);
@@ -109,12 +113,13 @@ class Declarations {
   void PrintScopeChain() { chain_.Print(); }
 
   class NodeScopeActivator;
+  class CleanNodeScopeActivator;
   class GenericScopeActivator;
   class ScopedGenericSpecializationKey;
   class ScopedGenericScopeChainSnapshot;
 
  private:
-  Scope* GetNodeScope(const AstNode* node);
+  Scope* GetNodeScope(const AstNode* node, bool reset_scope = false);
   Scope* GetGenericScope(Generic* generic, const TypeVector& types);
 
   template <class T>
@@ -123,6 +128,9 @@ class Declarations {
     declarables_.push_back(std::move(d));
     return ptr;
   }
+
+  MacroList* GetMacroListForName(const std::string& name,
+                                 const Signature& signature);
 
   void Declare(const std::string& name, std::unique_ptr<Declarable> d) {
     chain_.Declare(name, RegisterDeclarable(std::move(d)));
@@ -148,6 +156,15 @@ class Declarations::NodeScopeActivator {
  public:
   NodeScopeActivator(Declarations* declarations, AstNode* node)
       : activator_(declarations->GetNodeScope(node)) {}
+
+ private:
+  Scope::Activator activator_;
+};
+
+class Declarations::CleanNodeScopeActivator {
+ public:
+  CleanNodeScopeActivator(Declarations* declarations, AstNode* node)
+      : activator_(declarations->GetNodeScope(node, true)) {}
 
  private:
   Scope::Activator activator_;
@@ -188,6 +205,9 @@ class Declarations::ScopedGenericScopeChainSnapshot {
  private:
   ScopeChain::ScopedSnapshotRestorer restorer_;
 };
+
+std::string GetGeneratedCallableName(const std::string& name,
+                                     const TypeVector& specialized_types);
 
 }  // namespace torque
 }  // namespace internal

@@ -89,29 +89,19 @@ int MarkingVisitor<fixed_array_mode, retaining_path_mode,
 template <FixedArrayVisitationMode fixed_array_mode,
           TraceRetainingPathMode retaining_path_mode, typename MarkingState>
 int MarkingVisitor<fixed_array_mode, retaining_path_mode, MarkingState>::
-    VisitJSWeakCollection(Map* map, JSWeakCollection* weak_collection) {
-  // Enqueue weak collection in linked list of encountered weak collections.
-  if (weak_collection->next() == heap_->undefined_value()) {
-    weak_collection->set_next(heap_->encountered_weak_collections());
-    heap_->set_encountered_weak_collections(weak_collection);
+    VisitEphemeronHashTable(Map* map, EphemeronHashTable* table) {
+  collector_->AddEphemeronHashTable(table);
+
+  for (int i = 0; i < table->Capacity(); i++) {
+    HeapObject* key = HeapObject::cast(table->KeyAt(i));
+    if (marking_state()->IsBlackOrGrey(key)) {
+      Object** value_slot =
+          table->RawFieldOfElementAt(EphemeronHashTable::EntryToValueIndex(i));
+      VisitPointer(table, value_slot);
+    }
   }
 
-  // Skip visiting the backing hash table containing the mappings and the
-  // pointer to the other enqueued weak collections, both are post-processed.
-  int size = JSWeakCollection::BodyDescriptorWeak::SizeOf(map, weak_collection);
-  JSWeakCollection::BodyDescriptorWeak::IterateBody(map, weak_collection, size,
-                                                    this);
-
-  // Partially initialized weak collection is enqueued, but table is ignored.
-  if (!weak_collection->table()->IsHashTable()) return size;
-
-  // Mark the backing hash table without pushing it on the marking stack.
-  Object** slot =
-      HeapObject::RawField(weak_collection, JSWeakCollection::kTableOffset);
-  HeapObject* obj = HeapObject::cast(*slot);
-  collector_->RecordSlot(weak_collection, slot, obj);
-  MarkObjectWithoutPush(weak_collection, obj);
-  return size;
+  return table->SizeFromMap(map);
 }
 
 template <FixedArrayVisitationMode fixed_array_mode,
@@ -163,7 +153,7 @@ int MarkingVisitor<fixed_array_mode, retaining_path_mode,
       // Weak cells with live values are directly processed here to reduce
       // the processing time of weak cells during the main GC pause.
       Object** slot = HeapObject::RawField(weak_cell, WeakCell::kValueOffset);
-      collector_->RecordSlot(weak_cell, slot, *slot);
+      collector_->RecordSlot(weak_cell, slot, HeapObject::cast(*slot));
     } else {
       // If we do not know about liveness of values of weak cells, we have to
       // process them when we know the liveness of the whole transitive
@@ -401,13 +391,13 @@ void MarkCompactCollector::MarkExternallyReferencedObject(HeapObject* obj) {
 }
 
 void MarkCompactCollector::RecordSlot(HeapObject* object, Object** slot,
-                                      Object* target) {
+                                      HeapObject* target) {
   RecordSlot(object, reinterpret_cast<HeapObjectReference**>(slot), target);
 }
 
 void MarkCompactCollector::RecordSlot(HeapObject* object,
                                       HeapObjectReference** slot,
-                                      Object* target) {
+                                      HeapObject* target) {
   Page* target_page = Page::FromAddress(reinterpret_cast<Address>(target));
   Page* source_page = Page::FromAddress(reinterpret_cast<Address>(object));
   if (target_page->IsEvacuationCandidate<AccessMode::ATOMIC>() &&

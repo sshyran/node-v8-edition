@@ -9,6 +9,7 @@
 #include "src/bailout-reason.h"
 #include "src/globals.h"
 #include "src/ia32/assembler-ia32.h"
+#include "src/turbo-assembler.h"
 
 namespace v8 {
 namespace internal {
@@ -49,20 +50,14 @@ bool AreAliased(Register reg1, Register reg2, Register reg3 = no_reg,
                 Register reg8 = no_reg);
 #endif
 
-class TurboAssembler : public Assembler {
+class TurboAssembler : public TurboAssemblerBase {
  public:
   TurboAssembler(Isolate* isolate, void* buffer, int buffer_size,
-                 CodeObjectRequired create_code_object);
+                 CodeObjectRequired create_code_object)
+      : TurboAssemblerBase(isolate, buffer, buffer_size, create_code_object) {}
 
-  void set_has_frame(bool value) { has_frame_ = value; }
-  bool has_frame() const { return has_frame_; }
-
-  Isolate* isolate() const { return isolate_; }
-
-  Handle<HeapObject> CodeObject() {
-    DCHECK(!code_object_.is_null());
-    return code_object_;
-  }
+  TurboAssembler(IsolateData isolate_data, void* buffer, int buffer_size)
+      : TurboAssemblerBase(isolate_data, buffer, buffer_size) {}
 
   void CheckPageFlag(Register object, Register scratch, int mask, Condition cc,
                      Label* condition_met,
@@ -130,9 +125,9 @@ class TurboAssembler : public Assembler {
   inline bool AllowThisStubCall(CodeStub* stub);
   void CallStubDelayed(CodeStub* stub);
 
-  // TODO(jgruber): Remove in favor of MacroAssembler::CallRuntime.
-  void CallRuntimeDelayed(Zone* zone, Runtime::FunctionId fid,
-                          SaveFPRegsMode save_doubles = kDontSaveFPRegs);
+  // Call a runtime routine. This expects {centry} to contain a fitting CEntry
+  // builtin for the target runtime function and uses an indirect call.
+  void CallRuntimeWithCEntry(Runtime::FunctionId fid, Register centry);
 
   // Jump the register contains a smi.
   inline void JumpIfSmi(Register value, Label* smi_label,
@@ -200,6 +195,8 @@ class TurboAssembler : public Assembler {
   void Popcnt(Register dst, Operand src);
 
   void Ret();
+
+  void LoadRoot(Register destination, Heap::RootListIndex index) override;
 
   // Return and drop arguments from stack, where the number of arguments
   // may be bigger than 2^16 - 1.  Requires a scratch register.
@@ -366,23 +363,6 @@ class TurboAssembler : public Assembler {
   void ComputeCodeStartAddress(Register dst);
 
   void ResetSpeculationPoisonRegister();
-
-  bool root_array_available() const { return root_array_available_; }
-  void set_root_array_available(bool v) { root_array_available_ = v; }
-
-  void set_builtin_index(int builtin_index) {
-    maybe_builtin_index_ = builtin_index;
-  }
-
- protected:
-  // This handle will be patched with the code object on installation.
-  Handle<HeapObject> code_object_;
-
- private:
-  int maybe_builtin_index_ = -1;  // May be set while generating builtins.
-  bool has_frame_ = false;
-  bool root_array_available_ = false;
-  Isolate* const isolate_;
 };
 
 // MacroAssembler implements a collection of frequently used macros.
@@ -402,7 +382,6 @@ class MacroAssembler : public TurboAssembler {
   void Set(Operand dst, int32_t x) { mov(dst, Immediate(x)); }
 
   // Operations on roots in the root-array.
-  void LoadRoot(Register destination, Heap::RootListIndex index);
   void CompareRoot(Register with, Register scratch, Heap::RootListIndex index);
   // These methods can only be used with constant roots (i.e. non-writable
   // and not in new space).

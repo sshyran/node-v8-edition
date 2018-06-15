@@ -169,15 +169,6 @@ void ConstructStubDescriptor::InitializePlatformSpecific(
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
-void ConstructTrampolineDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  // r2 : number of arguments
-  // r3 : the target to call
-  // r5 : the new target
-  Register registers[] = {r3, r5, r2};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
 void AbortJSDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {r3};
@@ -196,29 +187,12 @@ void ArrayConstructorDescriptor::InitializePlatformSpecific(
   data->InitializePlatformSpecific(arraysize(registers), registers, nullptr);
 }
 
-void ArrayNoArgumentConstructorDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  // register state
-  // r2 -- number of arguments
-  // r3 -- function
-  // r4 -- allocation site with elements kind
-  Register registers[] = {r3, r4, r2};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-void ArraySingleArgumentConstructorDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  // register state
-  // r2 -- number of arguments
-  // r3 -- function
-  // r4 -- allocation site with elements kind
-  Register registers[] = {r3, r4, r2};
-  data->InitializePlatformSpecific(arraysize(registers), registers, nullptr);
-}
-
 void ArrayNArgumentsConstructorDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  // stack param count needs (constructor pointer, and single argument)
+  // register state
+  // r2 -- number of arguments
+  // r3 -- function
+  // r4 -- allocation site with elements kind
   Register registers[] = {r3, r4, r2};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }

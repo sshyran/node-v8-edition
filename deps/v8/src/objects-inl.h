@@ -83,6 +83,7 @@ TYPE_CHECKER(CodeDataContainer, CODE_DATA_CONTAINER_TYPE)
 TYPE_CHECKER(ConstantElementsPair, TUPLE2_TYPE)
 TYPE_CHECKER(CoverageInfo, FIXED_ARRAY_TYPE)
 TYPE_CHECKER(DescriptorArray, DESCRIPTOR_ARRAY_TYPE)
+TYPE_CHECKER(EphemeronHashTable, EPHEMERON_HASH_TABLE_TYPE)
 TYPE_CHECKER(FeedbackCell, FEEDBACK_CELL_TYPE)
 TYPE_CHECKER(FeedbackMetadata, FEEDBACK_METADATA_TYPE)
 TYPE_CHECKER(FeedbackVector, FEEDBACK_VECTOR_TYPE)
@@ -140,6 +141,7 @@ TYPE_CHECKER(WasmModuleObject, WASM_MODULE_TYPE)
 TYPE_CHECKER(WasmTableObject, WASM_TABLE_TYPE)
 TYPE_CHECKER(WeakArrayList, WEAK_ARRAY_LIST_TYPE)
 TYPE_CHECKER(WeakCell, WEAK_CELL_TYPE)
+TYPE_CHECKER(AllocationSite, ALLOCATION_SITE_TYPE)
 
 #ifdef V8_INTL_SUPPORT
 TYPE_CHECKER(JSLocale, JS_INTL_LOCALE_TYPE)
@@ -212,6 +214,26 @@ bool HeapObject::IsNullOrUndefined(Isolate* isolate) const {
   Heap* heap = isolate->heap();
   return this == heap->null_value() || this == heap->undefined_value();
 }
+
+#ifdef DEBUG
+#define IS_TYPE_FUNCTION_DEF(Type, Value)                                  \
+  bool Object::Is##Type() const {                                          \
+    return IsHeapObject() && HeapObject::cast(this)->Is##Type();           \
+  }                                                                        \
+  bool HeapObject::Is##Type() const {                                      \
+    return IsOddball() && Oddball::cast(this)->kind() == Oddball::k##Type; \
+  }
+ODDBALL_LIST(IS_TYPE_FUNCTION_DEF)
+#undef IS_TYPE_FUNCTION_DEF
+
+bool Object::IsNullOrUndefined() const {
+  return this->IsNull() || this->IsUndefined();
+}
+
+bool HeapObject::IsNullOrUndefined() const {
+  return this->IsNull() || this->IsUndefined();
+}
+#endif
 
 bool HeapObject::IsString() const {
   return map()->instance_type() < FIRST_NONSTRING_TYPE;
@@ -597,6 +619,7 @@ CAST_ACCESSOR(BoilerplateDescription)
 CAST_ACCESSOR(Cell)
 CAST_ACCESSOR(ConstantElementsPair)
 CAST_ACCESSOR(DescriptorArray)
+CAST_ACCESSOR(EphemeronHashTable)
 CAST_ACCESSOR(EnumCache)
 CAST_ACCESSOR(FeedbackCell)
 CAST_ACCESSOR(Foreign)
@@ -992,6 +1015,8 @@ Heap* HeapObject::GetHeap() const {
 Isolate* HeapObject::GetIsolate() const {
   return GetHeap()->isolate();
 }
+
+Isolate* JSReceiver::GetIsolate() const { return GetHeap()->isolate(); }
 
 Map* HeapObject::map() const {
   return map_word().ToMap();
@@ -2560,7 +2585,7 @@ Context* JSFunction::native_context() { return context()->native_context(); }
 
 
 void JSFunction::set_context(Object* value) {
-  DCHECK(value->IsUndefined(GetIsolate()) || value->IsContext());
+  DCHECK(value->IsUndefined() || value->IsContext());
   WRITE_FIELD(this, kContextOffset, value);
   WRITE_BARRIER(GetHeap(), this, kContextOffset, value);
 }
@@ -3197,8 +3222,7 @@ int SimpleNumberDictionaryShape::GetMapRootIndex() {
 }
 
 bool NameDictionaryShape::IsMatch(Handle<Name> key, Object* other) {
-  DCHECK(other->IsTheHole(key->GetIsolate()) ||
-         Name::cast(other)->IsUniqueName());
+  DCHECK(other->IsTheHole() || Name::cast(other)->IsUniqueName());
   DCHECK(key->IsUniqueName());
   return *key == other;
 }
@@ -3311,10 +3335,6 @@ Handle<Object> ObjectHashTableShape::AsHandle(Isolate* isolate,
   return key;
 }
 
-Handle<ObjectHashTable> ObjectHashTable::Shrink(Handle<ObjectHashTable> table) {
-  return DerivedHashTable::Shrink(table);
-}
-
 Relocatable::Relocatable(Isolate* isolate) {
   isolate_ = isolate;
   prev_ = isolate->relocatable_top();
@@ -3333,7 +3353,7 @@ Object* OrderedHashTableIterator<Derived, TableType>::CurrentKey() {
   TableType* table(TableType::cast(this->table()));
   int index = Smi::ToInt(this->index());
   Object* key = table->KeyAt(index);
-  DCHECK(!key->IsTheHole(table->GetIsolate()));
+  DCHECK(!key->IsTheHole());
   return key;
 }
 

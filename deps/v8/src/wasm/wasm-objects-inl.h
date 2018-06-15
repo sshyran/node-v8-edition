@@ -26,7 +26,6 @@ CAST_ACCESSOR(WasmGlobalObject)
 CAST_ACCESSOR(WasmInstanceObject)
 CAST_ACCESSOR(WasmMemoryObject)
 CAST_ACCESSOR(WasmModuleObject)
-CAST_ACCESSOR(WasmSharedModuleData)
 CAST_ACCESSOR(WasmTableObject)
 
 #define OPTIONAL_ACCESSORS(holder, name, type, offset)           \
@@ -53,7 +52,16 @@ CAST_ACCESSOR(WasmTableObject)
 ACCESSORS(WasmModuleObject, compiled_module, WasmCompiledModule,
           kCompiledModuleOffset)
 ACCESSORS(WasmModuleObject, export_wrappers, FixedArray, kExportWrappersOffset)
-ACCESSORS(WasmModuleObject, shared, WasmSharedModuleData, kSharedOffset)
+ACCESSORS(WasmModuleObject, managed_module, Object, kManagedModuleOffset)
+ACCESSORS(WasmModuleObject, module_bytes, SeqOneByteString, kModuleBytesOffset)
+ACCESSORS(WasmModuleObject, script, Script, kScriptOffset)
+OPTIONAL_ACCESSORS(WasmModuleObject, asm_js_offset_table, ByteArray,
+                   kAsmJsOffsetTableOffset)
+OPTIONAL_ACCESSORS(WasmModuleObject, breakpoint_infos, FixedArray,
+                   kBreakPointInfosOffset)
+void WasmModuleObject::reset_breakpoint_infos() {
+  WRITE_FIELD(this, kBreakPointInfosOffset, GetHeap()->undefined_value());
+}
 
 // WasmTableObject
 ACCESSORS(WasmTableObject, functions, FixedArray, kFunctionsOffset)
@@ -116,6 +124,8 @@ PRIMITIVE_ACCESSORS(WasmInstanceObject, memory_size, uint32_t,
                     kMemorySizeOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, memory_mask, uint32_t,
                     kMemoryMaskOffset)
+PRIMITIVE_ACCESSORS(WasmInstanceObject, roots_array_address, Address,
+                    kRootsArrayAddressOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, stack_limit_address, Address,
                     kStackLimitAddressOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, imported_function_targets, Address*,
@@ -184,20 +194,6 @@ ACCESSORS(WasmExportedFunctionData, wrapper_code, Code, kWrapperCodeOffset)
 ACCESSORS(WasmExportedFunctionData, instance, WasmInstanceObject,
           kInstanceOffset)
 SMI_ACCESSORS(WasmExportedFunctionData, function_index, kFunctionIndexOffset)
-
-// WasmSharedModuleData
-ACCESSORS(WasmSharedModuleData, managed_module, Object, kManagedModuleOffset)
-ACCESSORS(WasmSharedModuleData, module_bytes, SeqOneByteString,
-          kModuleBytesOffset)
-ACCESSORS(WasmSharedModuleData, script, Script, kScriptOffset)
-OPTIONAL_ACCESSORS(WasmSharedModuleData, asm_js_offset_table, ByteArray,
-                   kAsmJsOffsetTableOffset)
-OPTIONAL_ACCESSORS(WasmSharedModuleData, breakpoint_infos, FixedArray,
-                   kBreakPointInfosOffset)
-void WasmSharedModuleData::reset_breakpoint_infos() {
-  DCHECK(IsWasmSharedModuleData());
-  WRITE_FIELD(this, kBreakPointInfosOffset, GetHeap()->undefined_value());
-}
 
 // WasmDebugInfo
 ACCESSORS(WasmDebugInfo, wasm_instance, WasmInstanceObject, kInstanceOffset)

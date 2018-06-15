@@ -775,6 +775,8 @@ const char* V8HeapExplorer::GetSystemEntryName(HeapObject* object) {
     case PROPERTY_CELL_TYPE: return "system / PropertyCell";
     case FOREIGN_TYPE: return "system / Foreign";
     case ODDBALL_TYPE: return "system / Oddball";
+    case ALLOCATION_SITE_TYPE:
+      return "system / AllocationSite";
 #define MAKE_STRUCT_CASE(NAME, Name, name) \
     case NAME##_TYPE: return "system / "#Name;
   STRUCT_LIST(MAKE_STRUCT_CASE)
@@ -783,16 +785,12 @@ const char* V8HeapExplorer::GetSystemEntryName(HeapObject* object) {
   }
 }
 
-
-int V8HeapExplorer::EstimateObjectsCount(HeapIterator* iterator) {
+int V8HeapExplorer::EstimateObjectsCount() {
+  HeapIterator it(heap_, HeapIterator::kFilterUnreachable);
   int objects_count = 0;
-  for (HeapObject* obj = iterator->next(); obj != nullptr;
-       obj = iterator->next()) {
-    objects_count++;
-  }
+  while (it.next()) ++objects_count;
   return objects_count;
 }
-
 
 class IndexedReferencesExtractor : public ObjectVisitor {
  public:
@@ -839,10 +837,7 @@ class IndexedReferencesExtractor : public ObjectVisitor {
   int parent_;
 };
 
-
-bool V8HeapExplorer::ExtractReferencesPass1(int entry, HeapObject* obj) {
-  if (obj->IsFixedArray()) return false;  // FixedArrays are processed on pass 2
-
+void V8HeapExplorer::ExtractReferences(int entry, HeapObject* obj) {
   if (obj->IsJSGlobalProxy()) {
     ExtractJSGlobalProxyReferences(entry, JSGlobalProxy::cast(obj));
   } else if (obj->IsJSArrayBuffer()) {
@@ -894,20 +889,13 @@ bool V8HeapExplorer::ExtractReferencesPass1(int entry, HeapObject* obj) {
   } else if (obj->IsWeakArrayList()) {
     ExtractWeakArrayReferences(WeakArrayList::kHeaderSize, entry,
                                WeakArrayList::cast(obj));
-  }
-  return true;
-}
-
-
-bool V8HeapExplorer::ExtractReferencesPass2(int entry, HeapObject* obj) {
-  if (!obj->IsFixedArray()) return false;
-
-  if (obj->IsContext()) {
+  } else if (obj->IsContext()) {
     ExtractContextReferences(entry, Context::cast(obj));
-  } else {
+  } else if (obj->IsEphemeronHashTable()) {
+    ExtractEphemeronHashTableReferences(entry, EphemeronHashTable::cast(obj));
+  } else if (obj->IsFixedArray()) {
     ExtractFixedArrayReferences(entry, FixedArray::cast(obj));
   }
-  return true;
 }
 
 
@@ -1037,12 +1025,32 @@ void V8HeapExplorer::ExtractJSCollectionReferences(int entry,
 
 void V8HeapExplorer::ExtractJSWeakCollectionReferences(int entry,
                                                        JSWeakCollection* obj) {
-  if (obj->table()->IsHashTable()) {
-    ObjectHashTable* table = ObjectHashTable::cast(obj->table());
-    TagFixedArraySubType(table, JS_WEAK_COLLECTION_SUB_TYPE);
-  }
   SetInternalReference(obj, entry, "table", obj->table(),
                        JSWeakCollection::kTableOffset);
+}
+
+void V8HeapExplorer::ExtractEphemeronHashTableReferences(
+    int entry, EphemeronHashTable* table) {
+  for (int i = 0, capacity = table->Capacity(); i < capacity; ++i) {
+    int key_index = EphemeronHashTable::EntryToIndex(i) +
+                    EphemeronHashTable::kEntryKeyIndex;
+    int value_index = EphemeronHashTable::EntryToValueIndex(i);
+    Object* key = table->get(key_index);
+    Object* value = table->get(value_index);
+    SetWeakReference(table, entry, key_index, key,
+                     table->OffsetOfElementAt(key_index));
+    SetInternalReference(table, entry, value_index, value,
+                         table->OffsetOfElementAt(value_index));
+    HeapEntry* key_entry = GetEntry(key);
+    int key_entry_index = key_entry->index();
+    HeapEntry* value_entry = GetEntry(value);
+    if (key_entry && value_entry) {
+      const char* edge_name =
+          names_->GetFormatted("key %s in WeakMap", key_entry->name());
+      filler_->SetNamedAutoIndexReference(
+          HeapGraphEdge::kInternal, key_entry_index, edge_name, value_entry);
+    }
+  }
 }
 
 void V8HeapExplorer::ExtractContextReferences(int entry, Context* context) {
@@ -1350,50 +1358,10 @@ void V8HeapExplorer::ExtractJSPromiseReferences(int entry, JSPromise* promise) {
 }
 
 void V8HeapExplorer::ExtractFixedArrayReferences(int entry, FixedArray* array) {
-  auto it = array_types_.find(array);
-  if (it == array_types_.end()) {
-    for (int i = 0, l = array->length(); i < l; ++i) {
-      DCHECK(!HasWeakHeapObjectTag(array->get(i)));
-      SetInternalReference(array, entry, i, array->get(i),
-                           array->OffsetOfElementAt(i));
-    }
-    return;
-  }
-  switch (it->second) {
-    case JS_WEAK_COLLECTION_SUB_TYPE: {
-      ObjectHashTable* table = ObjectHashTable::cast(array);
-      for (int i = 0, capacity = table->Capacity(); i < capacity; ++i) {
-        int key_index =
-            ObjectHashTable::EntryToIndex(i) + ObjectHashTable::kEntryKeyIndex;
-        int value_index = ObjectHashTable::EntryToValueIndex(i);
-        Object* key = table->get(key_index);
-        Object* value = table->get(value_index);
-        SetWeakReference(table, entry, key_index, key,
-                         table->OffsetOfElementAt(key_index));
-        SetInternalReference(table, entry, value_index, value,
-                             table->OffsetOfElementAt(value_index));
-        HeapEntry* key_entry = GetEntry(key);
-        int key_entry_index = key_entry->index();
-        HeapEntry* value_entry = GetEntry(value);
-        if (key_entry && value_entry) {
-          const char* edge_name =
-              names_->GetFormatted("key %s in WeakMap", key_entry->name());
-          filler_->SetNamedAutoIndexReference(HeapGraphEdge::kInternal,
-                                              key_entry_index, edge_name,
-                                              value_entry);
-        }
-      }
-      break;
-    }
-
-    // TODO(alph): Add special processing for other types of FixedArrays.
-
-    default:
-      for (int i = 0, l = array->length(); i < l; ++i) {
-        SetInternalReference(array, entry, i, array->get(i),
-                             array->OffsetOfElementAt(i));
-      }
-      break;
+  for (int i = 0, l = array->length(); i < l; ++i) {
+    DCHECK(!HasWeakHeapObjectTag(array->get(i)));
+    SetInternalReference(array, entry, i, array->get(i),
+                         array->OffsetOfElementAt(i));
   }
 }
 
@@ -1579,9 +1547,7 @@ class RootsReferencesExtractor : public RootVisitor {
   bool visiting_weak_roots_;
 };
 
-
-bool V8HeapExplorer::IterateAndExtractReferences(
-    SnapshotFiller* filler) {
+bool V8HeapExplorer::IterateAndExtractReferences(SnapshotFiller* filler) {
   filler_ = filler;
 
   // Create references to the synthetic roots.
@@ -1598,27 +1564,8 @@ bool V8HeapExplorer::IterateAndExtractReferences(
   extractor.SetVisitingWeakRoots();
   heap_->IterateWeakGlobalHandles(&extractor);
 
-  // We have to do two passes as sometimes FixedArrays are used
-  // to weakly hold their items, and it's impossible to distinguish
-  // between these cases without processing the array owner first.
-  bool interrupted =
-      IterateAndExtractSinglePass<&V8HeapExplorer::ExtractReferencesPass1>() ||
-      IterateAndExtractSinglePass<&V8HeapExplorer::ExtractReferencesPass2>();
-
-  if (interrupted) {
-    filler_ = nullptr;
-    return false;
-  }
-
-  filler_ = nullptr;
-  return progress_->ProgressReport(true);
-}
-
-
-template<V8HeapExplorer::ExtractReferencesMethod extractor>
-bool V8HeapExplorer::IterateAndExtractSinglePass() {
-  // Now iterate the whole heap.
   bool interrupted = false;
+
   HeapIterator iterator(heap_, HeapIterator::kFilterUnreachable);
   // Heap iteration with filtering must be finished in any case.
   for (HeapObject *obj = iterator.next(); obj != nullptr;
@@ -1635,14 +1582,13 @@ bool V8HeapExplorer::IterateAndExtractSinglePass() {
 
     HeapEntry* heap_entry = GetEntry(obj);
     int entry = heap_entry->index();
-    if ((this->*extractor)(entry, obj)) {
-      SetInternalReference(obj, entry,
-                           "map", obj->map(), HeapObject::kMapOffset);
-      // Extract unvisited fields as hidden references and restore tags
-      // of visited fields.
-      IndexedReferencesExtractor refs_extractor(this, obj, entry);
-      obj->Iterate(&refs_extractor);
-    }
+    ExtractReferences(entry, obj);
+    SetInternalReference(obj, entry, "map", obj->map(), HeapObject::kMapOffset);
+    // Extract unvisited fields as hidden references and restore tags
+    // of visited fields.
+    IndexedReferencesExtractor refs_extractor(this, obj, entry);
+    obj->Iterate(&refs_extractor);
+
     // Ensure visited_fields_ doesn't leak to the next object.
     for (size_t i = 0; i < max_pointer; ++i) {
       DCHECK(!visited_fields_[i]);
@@ -1650,7 +1596,9 @@ bool V8HeapExplorer::IterateAndExtractSinglePass() {
 
     if (!progress_->ProgressReport(false)) interrupted = true;
   }
-  return interrupted;
+
+  filler_ = nullptr;
+  return interrupted ? false : progress_->ProgressReport(true);
 }
 
 
@@ -1911,6 +1859,9 @@ const char* V8HeapExplorer::GetStrongGcSubrootName(Object* object) {
 #define STRUCT_MAP_NAME(NAME, Name, name) NAME_ENTRY(name##_map)
     STRUCT_LIST(STRUCT_MAP_NAME)
 #undef STRUCT_MAP_NAME
+#define ALLOCATION_SITE_MAP_NAME(NAME, Name, Size, name) NAME_ENTRY(name##_map)
+    ALLOCATION_SITE_LIST(ALLOCATION_SITE_MAP_NAME)
+#undef ALLOCATION_SITE_MAP_NAME
 #define DATA_HANDLER_MAP_NAME(NAME, Name, Size, name) NAME_ENTRY(name##_map)
     DATA_HANDLER_LIST(DATA_HANDLER_MAP_NAME)
 #undef DATA_HANDLER_MAP_NAME
@@ -1941,12 +1892,6 @@ void V8HeapExplorer::TagObject(Object* obj, const char* tag) {
       entry->set_name(tag);
     }
   }
-}
-
-void V8HeapExplorer::TagFixedArraySubType(const FixedArray* array,
-                                          FixedArraySubInstanceType type) {
-  DCHECK(array_types_.find(array) == array_types_.end());
-  array_types_[array] = type;
 }
 
 class GlobalObjectsEnumerator : public RootVisitor {
@@ -2463,7 +2408,7 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
   }
 #endif
 
-  SetProgressTotal(2);  // 2 passes.
+  InitProgressCounter();
 
 #ifdef VERIFY_HEAP
   if (FLAG_verify_heap) {
@@ -2483,11 +2428,9 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
   return true;
 }
 
-
 void HeapSnapshotGenerator::ProgressStep() {
   ++progress_counter_;
 }
-
 
 bool HeapSnapshotGenerator::ProgressReport(bool force) {
   const int kProgressReportGranularity = 10000;
@@ -2499,27 +2442,22 @@ bool HeapSnapshotGenerator::ProgressReport(bool force) {
   return true;
 }
 
-
-void HeapSnapshotGenerator::SetProgressTotal(int iterations_count) {
+void HeapSnapshotGenerator::InitProgressCounter() {
   if (control_ == nullptr) return;
-  HeapIterator iterator(heap_, HeapIterator::kFilterUnreachable);
   // The +1 ensures that intermediate ProgressReport calls will never signal
   // that the work is finished (i.e. progress_counter_ == progress_total_).
   // Only the forced ProgressReport() at the end of GenerateSnapshot()
   // should signal that the work is finished because signalling finished twice
   // breaks the DevTools frontend.
-  progress_total_ =
-      iterations_count * (v8_heap_explorer_.EstimateObjectsCount(&iterator) +
-                          dom_explorer_.EstimateObjectsCount()) +
-      1;
+  progress_total_ = v8_heap_explorer_.EstimateObjectsCount() +
+                    dom_explorer_.EstimateObjectsCount() + 1;
   progress_counter_ = 0;
 }
 
-
 bool HeapSnapshotGenerator::FillReferences() {
   SnapshotFiller filler(snapshot_, &entries_);
-  return v8_heap_explorer_.IterateAndExtractReferences(&filler)
-      && dom_explorer_.IterateAndExtractReferences(&filler);
+  return v8_heap_explorer_.IterateAndExtractReferences(&filler) &&
+         dom_explorer_.IterateAndExtractReferences(&filler);
 }
 
 

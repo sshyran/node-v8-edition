@@ -344,7 +344,7 @@ RUNTIME_FUNCTION(Runtime_GetGeneratorScopeDetails) {
     return isolate->heap()->undefined_value();
   }
 
-  RETURN_RESULT_OR_FAILURE(isolate, it.MaterializeScopeDetails());
+  return *it.MaterializeScopeDetails();
 }
 
 static bool SetScopeVariableValue(ScopeIterator* it, int index,
@@ -539,7 +539,6 @@ int ScriptLinePosition(Handle<Script> script, int line) {
 
   if (script->type() == Script::TYPE_WASM) {
     return WasmModuleObject::cast(script->wasm_module_object())
-        ->shared()
         ->GetFunctionOffset(line);
   }
 

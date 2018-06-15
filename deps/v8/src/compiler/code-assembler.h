@@ -531,6 +531,7 @@ TNode<Float64T> Float64Add(TNode<Float64T> a, TNode<Float64T> b);
   V(ChangeInt32ToInt64, Int64T, Int32T)                        \
   V(ChangeUint32ToFloat64, Float64T, Word32T)                  \
   V(ChangeUint32ToUint64, Uint64T, Word32T)                    \
+  V(BitcastInt32ToFloat32, Float32T, Int32T)                   \
   V(RoundFloat64ToInt32, Int32T, Float64T)                     \
   V(RoundInt32ToFloat32, Int32T, Float32T)                     \
   V(Float64SilenceNaN, Float64T, Float64T)                     \
@@ -691,10 +692,6 @@ class V8_EXPORT_PRIVATE CodeAssembler {
 
 #ifdef DEBUG
   void GenerateCheckMaybeObjectIsObject(Node* node, const char* location);
-#endif
-
-#ifdef V8_EMBEDDED_BUILTINS
-  TNode<ExternalReference> LookupExternalReference(ExternalReference reference);
 #endif
 
   // Constants.
@@ -978,9 +975,6 @@ class V8_EXPORT_PRIVATE CodeAssembler {
 
   // Calls
   template <class... TArgs>
-  TNode<Object> CallRuntimeImpl(Runtime::FunctionId function,
-                                SloppyTNode<Object> context, TArgs... args);
-  template <class... TArgs>
   TNode<Object> CallRuntime(Runtime::FunctionId function,
                             SloppyTNode<Object> context, TArgs... args) {
     return CallRuntimeImpl(function, context,
@@ -988,56 +982,75 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   }
 
   template <class... TArgs>
-  TNode<Object> TailCallRuntimeImpl(Runtime::FunctionId function,
-                                    SloppyTNode<Object> context, TArgs... args);
-  template <class... TArgs>
-  TNode<Object> TailCallRuntime(Runtime::FunctionId function,
-                                SloppyTNode<Object> context, TArgs... args) {
-    return TailCallRuntimeImpl(function, context,
+  void TailCallRuntime(Runtime::FunctionId function,
+                       SloppyTNode<Object> context, TArgs... args) {
+    int argc = static_cast<int>(sizeof...(args));
+    TNode<Int32T> arity = Int32Constant(argc);
+    return TailCallRuntimeImpl(function, arity, context,
                                implicit_cast<SloppyTNode<Object>>(args)...);
+  }
+
+  template <class... TArgs>
+  void TailCallRuntime(Runtime::FunctionId function, TNode<Int32T> arity,
+                       SloppyTNode<Object> context, TArgs... args) {
+    return TailCallRuntimeImpl(function, arity, context,
+                               implicit_cast<SloppyTNode<Object>>(args)...);
+  }
+
+  template <class... TArgs>
+  void TailCallRuntimeWithCEntry(Runtime::FunctionId function,
+                                 TNode<Code> centry, TNode<Object> context,
+                                 TArgs... args) {
+    int argc = static_cast<int>(sizeof...(args));
+    TNode<Int32T> arity = Int32Constant(argc);
+    return TailCallRuntimeWithCEntryImpl(
+        function, arity, centry, context,
+        implicit_cast<SloppyTNode<Object>>(args)...);
   }
 
   //
   // If context passed to CallStub is nullptr, it won't be passed to the stub.
   //
 
-  template <class... TArgs>
-  Node* CallStub(Callable const& callable, Node* context, TArgs... args) {
-    Node* target = HeapConstant(callable.code());
-    return CallStub(callable.descriptor(), target, context,
-                    implicit_cast<Node*>(args)...);
+  template <class T = Object, class... TArgs>
+  TNode<T> CallStub(Callable const& callable, SloppyTNode<Object> context,
+                    TArgs... args) {
+    TNode<Code> target = HeapConstant(callable.code());
+    return CallStub<T>(callable.descriptor(), target, context,
+                       implicit_cast<Node*>(args)...);
   }
 
-  template <class... TArgs>
-  Node* CallStub(const CallInterfaceDescriptor& descriptor, Node* target,
-                 Node* context, TArgs... args) {
-    return CallStubR(descriptor, 1, target, context,
-                     implicit_cast<Node*>(args)...);
+  template <class T = Object, class... TArgs>
+  TNode<T> CallStub(const CallInterfaceDescriptor& descriptor,
+                    SloppyTNode<Code> target, SloppyTNode<Object> context,
+                    TArgs... args) {
+    return UncheckedCast<T>(CallStubR(descriptor, 1, target, context,
+                                      implicit_cast<Node*>(args)...));
   }
 
   template <class... TArgs>
   Node* CallStubR(const CallInterfaceDescriptor& descriptor, size_t result_size,
-                  Node* target, Node* context, TArgs... args);
+                  SloppyTNode<Code> target, SloppyTNode<Object> context,
+                  TArgs... args);
 
   Node* CallStubN(const CallInterfaceDescriptor& descriptor, size_t result_size,
                   int input_count, Node* const* inputs,
                   bool pass_context = true);
 
   template <class... TArgs>
-  Node* TailCallStub(Callable const& callable, Node* context, TArgs... args) {
-    Node* target = HeapConstant(callable.code());
+  void TailCallStub(Callable const& callable, SloppyTNode<Object> context,
+                    TArgs... args) {
+    TNode<Code> target = HeapConstant(callable.code());
     return TailCallStub(callable.descriptor(), target, context, args...);
   }
 
   template <class... TArgs>
-  Node* TailCallStub(const CallInterfaceDescriptor& descriptor, Node* target,
-                     Node* context, TArgs... args) {
+  void TailCallStub(const CallInterfaceDescriptor& descriptor,
+                    SloppyTNode<Code> target, SloppyTNode<Object> context,
+                    TArgs... args) {
     return TailCallStubImpl(descriptor, target, context,
                             implicit_cast<Node*>(args)...);
   }
-  template <class... TArgs>
-  Node* TailCallStubImpl(const CallInterfaceDescriptor& descriptor,
-                         Node* target, Node* context, TArgs... args);
 
   template <class... TArgs>
   Node* TailCallBytecodeDispatch(const CallInterfaceDescriptor& descriptor,
@@ -1047,6 +1060,18 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   Node* TailCallStubThenBytecodeDispatch(
       const CallInterfaceDescriptor& descriptor, Node* context, Node* target,
       TArgs... args);
+
+  // Tailcalls to the given code object with JSCall linkage. The JS arguments
+  // (including receiver) are supposed to be already on the stack.
+  // This is a building block for implementing trampoline stubs that are
+  // installed instead of code objects with JSCall linkage.
+  // Note that no arguments adaption is going on here - all the JavaScript
+  // arguments are left on the stack unmodified. Therefore, this tail call can
+  // only be used after arguments adaptation has been performed already.
+  TNode<Object> TailCallJSCode(TNode<Code> code, TNode<Context> context,
+                               TNode<JSFunction> function,
+                               TNode<Object> new_target,
+                               TNode<Int32T> arg_count);
 
   template <class... TArgs>
   Node* CallJS(Callable const& callable, Node* context, Node* function,
@@ -1156,6 +1181,23 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   PoisoningMitigationLevel poisoning_level() const;
 
  private:
+  template <class... TArgs>
+  TNode<Object> CallRuntimeImpl(Runtime::FunctionId function,
+                                TNode<Object> context, TArgs... args);
+
+  template <class... TArgs>
+  void TailCallRuntimeImpl(Runtime::FunctionId function, TNode<Int32T> arity,
+                           TNode<Object> context, TArgs... args);
+
+  template <class... TArgs>
+  void TailCallRuntimeWithCEntryImpl(Runtime::FunctionId function,
+                                     TNode<Int32T> arity, TNode<Code> centry,
+                                     TNode<Object> context, TArgs... args);
+
+  template <class... TArgs>
+  void TailCallStubImpl(const CallInterfaceDescriptor& descriptor,
+                        TNode<Code> target, TNode<Object> context,
+                        TArgs... args);
   // These two don't have definitions and are here only for catching use cases
   // where the cast is not necessary.
   TNode<Int32T> Signed(TNode<Int32T> x);

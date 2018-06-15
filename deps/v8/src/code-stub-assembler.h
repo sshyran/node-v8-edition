@@ -26,7 +26,9 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
 #define HEAP_CONSTANT_LIST(V)                                               \
   V(AccessorInfoMap, accessor_info_map, AccessorInfoMap)                    \
   V(AccessorPairMap, accessor_pair_map, AccessorPairMap)                    \
-  V(AllocationSiteMap, allocation_site_map, AllocationSiteMap)              \
+  V(AllocationSiteWithWeakNextMap, allocation_site_map, AllocationSiteMap)  \
+  V(AllocationSiteWithoutWeakNextMap, allocation_site_without_weaknext_map, \
+    AllocationSiteWithoutWeakNextMap)                                       \
   V(ArraySpeciesProtector, array_species_protector, ArraySpeciesProtector)  \
   V(BooleanMap, boolean_map, BooleanMap)                                    \
   V(CodeMap, code_map, CodeMap)                                             \
@@ -180,6 +182,24 @@ struct IteratorRecord {
 #define CSA_SLOW_ASSERT(csa, ...) ((void)0)
 #endif
 
+class int31_t {
+ public:
+  int31_t() : value_(0) {}
+  int31_t(int value) : value_(value) {  // NOLINT(runtime/explicit)
+    DCHECK_EQ((value & 0x80000000) != 0, (value & 0x40000000) != 0);
+  }
+  int31_t& operator=(int value) {
+    DCHECK_EQ((value & 0x80000000) != 0, (value & 0x40000000) != 0);
+    value_ = value;
+    return *this;
+  }
+  int32_t value() const { return value_; }
+  operator int32_t() const { return value_; }
+
+ private:
+  int32_t value_;
+};
+
 // Provides JavaScript-specific "macro-assembler" functionality on top of the
 // CodeAssembler. By factoring the JavaScript-isms out of the CodeAssembler,
 // it's possible to add JavaScript-specific useful CodeAssembler "macros"
@@ -290,9 +310,49 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
     return CAST(result);
   }
 
-  // Returns true iff number is NaN.
-  // TOOD(szuend): Remove when UncheckedCasts are supported in Torque.
-  TNode<BoolT> NumberIsNaN(TNode<Number> number);
+  TNode<HeapNumber> UnsafeCastNumberToHeapNumber(TNode<Number> p_n) {
+    return CAST(p_n);
+  }
+
+  TNode<FixedArray> UnsafeCastObjectToFixedArray(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<FixedDoubleArray> UnsafeCastObjectToFixedDoubleArray(
+      TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<HeapNumber> UnsafeCastObjectToHeapNumber(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<HeapObject> UnsafeCastObjectToCallable(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<Smi> UnsafeCastObjectToSmi(TNode<Object> p_o) { return CAST(p_o); }
+
+  TNode<Number> UnsafeCastObjectToNumber(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<HeapObject> UnsafeCastObjectToHeapObject(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<JSArray> UnsafeCastObjectToJSArray(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<FixedTypedArrayBase> UnsafeCastObjectToFixedTypedArrayBase(
+      TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<Object> UnsafeCastObjectToCompareBuiltinFn(TNode<Object> p_o) {
+    return p_o;
+  }
 
   Node* MatchesParameterMode(Node* value, ParameterMode mode);
 
@@ -319,7 +379,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                   SmiAboveOrEqual)
 #undef PARAMETER_BINOP
 
-  Node* NoContextConstant();
+  TNode<Object> NoContextConstant();
 #define HEAP_CONSTANT_ACCESSOR(rootIndexName, rootAccessorName, name) \
   compiler::TNode<std::remove_reference<decltype(                     \
       *std::declval<Heap>().rootAccessorName())>::type>               \
@@ -1547,6 +1607,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   TNode<BoolT> IsFixedTypedArray(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsFunctionWithPrototypeSlotMap(SloppyTNode<Map> map);
   TNode<BoolT> IsHashTable(SloppyTNode<HeapObject> object);
+  TNode<BoolT> IsEphemeronHashTable(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsHeapNumber(SloppyTNode<HeapObject> object);
   TNode<BoolT> IsIndirectStringInstanceType(SloppyTNode<Int32T> instance_type);
   TNode<BoolT> IsJSArrayBuffer(SloppyTNode<HeapObject> object);
@@ -1632,18 +1693,42 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   // within Smi range.
   TNode<BoolT> IsNumberNormalized(SloppyTNode<Number> number);
   TNode<BoolT> IsNumberPositive(SloppyTNode<Number> number);
+  TNode<BoolT> IsHeapNumberPositive(TNode<HeapNumber> number);
+
+  // True iff {number} is non-negative and less or equal than 2**53-1.
+  TNode<BoolT> IsNumberNonNegativeSafeInteger(TNode<Number> number);
+
+  // True iff {number} represents an integer value.
+  TNode<BoolT> IsInteger(TNode<Object> number);
+  TNode<BoolT> IsInteger(TNode<HeapNumber> number);
+
+  // True iff abs({number}) <= 2**53 -1
+  TNode<BoolT> IsSafeInteger(TNode<Object> number);
+  TNode<BoolT> IsSafeInteger(TNode<HeapNumber> number);
+
+  // True iff {number} represents a valid uint32t value.
+  TNode<BoolT> IsHeapNumberUint32(TNode<HeapNumber> number);
+
   // True iff {number} is a positive number and a valid array index in the range
   // [0, 2^32-1).
-  TNode<BoolT> IsNumberArrayIndex(SloppyTNode<Number> number);
+  TNode<BoolT> IsNumberArrayIndex(TNode<Number> number);
 
   Node* FixedArraySizeDoesntFitInNewSpace(
       Node* element_count, int base_size = FixedArray::kHeaderSize,
       ParameterMode mode = INTPTR_PARAMETERS);
 
   // ElementsKind helpers:
+  TNode<BoolT> ElementsKindEqual(TNode<Int32T> a, TNode<Int32T> b) {
+    return Word32Equal(a, b);
+  }
+  bool ElementsKindEqual(ElementsKind a, ElementsKind b) { return a == b; }
   Node* IsFastElementsKind(Node* elements_kind);
   bool IsFastElementsKind(ElementsKind kind) {
     return v8::internal::IsFastElementsKind(kind);
+  }
+  TNode<BoolT> IsDoubleElementsKind(TNode<Int32T> elements_kind);
+  bool IsDoubleElementsKind(ElementsKind kind) {
+    return v8::internal::IsDoubleElementsKind(kind);
   }
   Node* IsFastSmiOrTaggedElementsKind(Node* elements_kind);
   Node* IsFastSmiElementsKind(Node* elements_kind);
@@ -1800,13 +1885,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   // Returns a node that contains the updated values of a |BitField|.
   template <typename BitField>
-  Node* UpdateWord(Node* word, Node* value) {
+  TNode<WordT> UpdateWord(TNode<WordT> word, TNode<WordT> value) {
     return UpdateWord(word, value, BitField::kShift, BitField::kMask);
   }
 
   // Returns a node that contains the updated {value} inside {word} starting
   // at {shift} and fitting in {mask}.
-  Node* UpdateWord(Node* word, Node* value, uint32_t shift, uint32_t mask);
+  TNode<WordT> UpdateWord(TNode<WordT> word, TNode<WordT> value, uint32_t shift,
+                          uint32_t mask);
 
   // Returns true if any of the |T|'s bits in given |word32| are set.
   template <typename T>
@@ -2044,6 +2130,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                               TVariable<IntPtrT>* var_entry,
                               Label* if_not_found);
 
+  TNode<Object> LoadNumberDictionaryElement(TNode<NumberDictionary> dictionary,
+                                            TNode<IntPtrT> intptr_index,
+                                            Label* not_data, Label* if_hole);
+
   template <class Dictionary>
   void FindInsertionEntry(TNode<Dictionary> dictionary, TNode<Name> key,
                           TVariable<IntPtrT>* var_key_index);
@@ -2087,30 +2177,28 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   TNode<Object> GetProperty(SloppyTNode<Context> context,
                             SloppyTNode<Object> receiver,
                             SloppyTNode<Object> name) {
-    return UncheckedCast<Object>(
-        CallStub(Builtins::CallableFor(isolate(), Builtins::kGetProperty),
-                 context, receiver, name));
+    return CallStub(Builtins::CallableFor(isolate(), Builtins::kGetProperty),
+                    context, receiver, name);
   }
 
   Node* GetMethod(Node* context, Node* object, Handle<Name> name,
                   Label* if_null_or_undefined);
 
   template <class... TArgs>
-  TNode<Object> CallBuiltin(Builtins::Name id, SloppyTNode<Context> context,
+  TNode<Object> CallBuiltin(Builtins::Name id, SloppyTNode<Object> context,
                             TArgs... args) {
     DCHECK_IMPLIES(Builtins::KindOf(id) == Builtins::TFJ,
                    !Builtins::IsLazy(id));
-    return UncheckedCast<Object>(
-        CallStub(Builtins::CallableFor(isolate(), id), context, args...));
+    return CallStub<Object>(Builtins::CallableFor(isolate(), id), context,
+                            args...);
   }
 
   template <class... TArgs>
-  TNode<Object> TailCallBuiltin(Builtins::Name id, SloppyTNode<Context> context,
-                                TArgs... args) {
+  void TailCallBuiltin(Builtins::Name id, SloppyTNode<Object> context,
+                       TArgs... args) {
     DCHECK_IMPLIES(Builtins::KindOf(id) == Builtins::TFJ,
                    !Builtins::IsLazy(id));
-    return UncheckedCast<Object>(
-        TailCallStub(Builtins::CallableFor(isolate(), id), context, args...));
+    return TailCallStub(Builtins::CallableFor(isolate(), id), context, args...);
   }
 
   void LoadPropertyFromFastObject(Node* object, Node* map,
@@ -2209,10 +2297,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   Node* OrdinaryHasInstance(Node* context, Node* callable, Node* object);
 
   // Load type feedback vector from the stub caller's frame.
-  Node* LoadFeedbackVectorForStub();
+  TNode<FeedbackVector> LoadFeedbackVectorForStub();
 
   // Load type feedback vector for the given closure.
-  Node* LoadFeedbackVector(Node* closure);
+  TNode<FeedbackVector> LoadFeedbackVector(SloppyTNode<JSFunction> closure,
+                                           Label* if_undefined = nullptr);
 
   // Update the type feedback vector.
   void UpdateFeedback(Node* feedback, Node* feedback_vector, Node* slot_id);
@@ -2295,7 +2384,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   void TrapAllocationMemento(Node* object, Label* memento_found);
 
-  Node* PageFromAddress(Node* address);
+  TNode<IntPtrT> PageFromAddress(TNode<IntPtrT> address);
 
   // Store a weak in-place reference into the FeedbackVector.
   TNode<MaybeObject> StoreWeakReferenceInFeedbackVector(
@@ -2304,7 +2393,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   // Create a new AllocationSite and install it into a feedback vector.
   TNode<AllocationSite> CreateAllocationSiteInFeedbackVector(
-      Node* feedback_vector, Node* slot);
+      SloppyTNode<FeedbackVector> feedback_vector, TNode<Smi> slot);
+
+  // TODO(ishell, cbruni): Change to HasBoilerplate.
+  TNode<BoolT> NotHasBoilerplate(TNode<Object> maybe_literal_site);
+  TNode<Smi> LoadTransitionInfo(TNode<AllocationSite> allocation_site);
+  TNode<JSObject> LoadBoilerplate(TNode<AllocationSite> allocation_site);
+  TNode<Int32T> LoadElementsKind(TNode<AllocationSite> allocation_site);
 
   enum class IndexAdvanceMode { kPre, kPost };
 
@@ -2459,8 +2554,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   TNode<Code> LoadBuiltin(TNode<Smi> builtin_id);
 
   // Figure out the SFI's code object using its data field.
+  // If |if_compile_lazy| is provided then the execution will go to the given
+  // label in case of an CompileLazy code object.
   TNode<Code> GetSharedFunctionInfoCode(
-      SloppyTNode<SharedFunctionInfo> shared_info);
+      SloppyTNode<SharedFunctionInfo> shared_info,
+      Label* if_compile_lazy = nullptr);
 
   Node* AllocateFunctionWithMapAndContext(Node* map, Node* shared_info,
                                           Node* context);
@@ -2511,7 +2609,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
 
   bool ConstexprBoolNot(bool value) { return !value; }
 
-  void PerformStackCheck(Node* context);
+  void PerformStackCheck(TNode<Context> context);
 
  protected:
   // Implements DescriptorArray::Search().
@@ -2680,6 +2778,10 @@ class CodeStubArguments {
                     ReceiverMode receiver_mode = ReceiverMode::kHasReceiver);
 
   TNode<Object> GetReceiver() const;
+  // Replaces receiver argument on the expression stack. Should be used only
+  // for manipulating arguments in trampoline builtins before tail calling
+  // further with passing all the JS arguments as is.
+  void SetReceiver(TNode<Object> object) const;
 
   TNode<RawPtr<Object>> AtIndexPtr(
       Node* index, CodeStubAssembler::ParameterMode mode =
@@ -2717,8 +2819,9 @@ class CodeStubArguments {
 
   // Iteration doesn't include the receiver. |first| and |last| are zero-based.
   void ForEach(const ForEachBodyFunction& body, Node* first = nullptr,
-               Node* last = nullptr, CodeStubAssembler::ParameterMode mode =
-                                         CodeStubAssembler::INTPTR_PARAMETERS) {
+               Node* last = nullptr,
+               CodeStubAssembler::ParameterMode mode =
+                   CodeStubAssembler::INTPTR_PARAMETERS) {
     CodeStubAssembler::VariableList list(0, assembler_->zone());
     ForEach(list, body, first, last);
   }
@@ -2726,8 +2829,9 @@ class CodeStubArguments {
   // Iteration doesn't include the receiver. |first| and |last| are zero-based.
   void ForEach(const CodeStubAssembler::VariableList& vars,
                const ForEachBodyFunction& body, Node* first = nullptr,
-               Node* last = nullptr, CodeStubAssembler::ParameterMode mode =
-                                         CodeStubAssembler::INTPTR_PARAMETERS);
+               Node* last = nullptr,
+               CodeStubAssembler::ParameterMode mode =
+                   CodeStubAssembler::INTPTR_PARAMETERS);
 
   void PopAndReturn(Node* value);
 

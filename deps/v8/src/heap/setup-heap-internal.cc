@@ -74,9 +74,14 @@ const Heap::StructTable Heap::struct_table[] = {
     STRUCT_LIST(STRUCT_TABLE_ELEMENT)
 #undef STRUCT_TABLE_ELEMENT
 
+#define ALLOCATION_SITE_ELEMENT(NAME, Name, Size, name) \
+  {NAME##_TYPE, Name::kSize##Size, k##Name##Size##MapRootIndex},
+        ALLOCATION_SITE_LIST(ALLOCATION_SITE_ELEMENT)
+#undef ALLOCATION_SITE_ELEMENT
+
 #define DATA_HANDLER_ELEMENT(NAME, Name, Size, name) \
   {NAME##_TYPE, Name::kSizeWithData##Size, k##Name##Size##MapRootIndex},
-        DATA_HANDLER_LIST(DATA_HANDLER_ELEMENT)
+            DATA_HANDLER_LIST(DATA_HANDLER_ELEMENT)
 #undef DATA_HANDLER_ELEMENT
 };
 
@@ -106,8 +111,8 @@ AllocationResult Heap::AllocateMap(InstanceType instance_type,
     // Eagerly initialize the WeakCell cache for the map as it will not be
     // writable in RO_SPACE.
     HandleScope handle_scope(isolate());
-    Handle<WeakCell> weak_cell =
-        isolate()->factory()->NewWeakCell(Handle<Map>(map), TENURED_READ_ONLY);
+    Handle<WeakCell> weak_cell = isolate()->factory()->NewWeakCell(
+        Handle<Map>(map, isolate()), TENURED_READ_ONLY);
     map->set_weak_cell_cache(*weak_cell);
   }
 
@@ -160,8 +165,8 @@ void Heap::FinalizePartialMap(Map* map) {
   // Eagerly initialize the WeakCell cache for the map as it will not be
   // writable in RO_SPACE.
   HandleScope handle_scope(isolate());
-  Handle<WeakCell> weak_cell =
-      isolate()->factory()->NewWeakCell(Handle<Map>(map), TENURED_READ_ONLY);
+  Handle<WeakCell> weak_cell = isolate()->factory()->NewWeakCell(
+      Handle<Map>(map, isolate()), TENURED_READ_ONLY);
   map->set_weak_cell_cache(*weak_cell);
 }
 
@@ -457,6 +462,8 @@ bool Heap::CreateInitialMaps() {
     ALLOCATE_VARSIZE_MAP(HASH_TABLE_TYPE, number_dictionary)
     ALLOCATE_VARSIZE_MAP(HASH_TABLE_TYPE, simple_number_dictionary)
     ALLOCATE_VARSIZE_MAP(HASH_TABLE_TYPE, string_table)
+
+    ALLOCATE_VARSIZE_MAP(EPHEMERON_HASH_TABLE_TYPE, ephemeron_hash_table)
 
     ALLOCATE_VARSIZE_MAP(FIXED_ARRAY_TYPE, array_list)
 

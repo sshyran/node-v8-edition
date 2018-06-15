@@ -36,7 +36,7 @@ module test {
   }
 
   macro TestConstexpr1() {
-    check(convert<bool>(IsFastElementsKind(PACKED_SMI_ELEMENTS)));
+    check(from_constexpr<bool>(IsFastElementsKind(PACKED_SMI_ELEMENTS)));
   }
 
   macro TestConstexprIf() {
@@ -46,10 +46,10 @@ module test {
   }
 
   macro TestConstexprReturn() {
-    check(convert<bool>(ElementsKindTestHelper3(UINT8_ELEMENTS)));
-    check(convert<bool>(ElementsKindTestHelper3(UINT16_ELEMENTS)));
-    check(!convert<bool>(ElementsKindTestHelper3(UINT32_ELEMENTS)));
-    check(convert<bool>(!ElementsKindTestHelper3(UINT32_ELEMENTS)));
+    check(from_constexpr<bool>(ElementsKindTestHelper3(UINT8_ELEMENTS)));
+    check(from_constexpr<bool>(ElementsKindTestHelper3(UINT16_ELEMENTS)));
+    check(!from_constexpr<bool>(ElementsKindTestHelper3(UINT32_ELEMENTS)));
+    check(from_constexpr<bool>(!ElementsKindTestHelper3(UINT32_ELEMENTS)));
   }
 
   macro TestGotoLabel(): Boolean {
@@ -212,5 +212,11 @@ module test {
   macro TestLargeIntegerLiterals(c: Context) {
     let x: int32 = 0x40000000;
     let y: int32 = 0x7fffffff;
+  }
+
+  macro TestMultilineAssert() {
+    let someVeryLongVariableNameThatWillCauseLineBreaks: Smi = 5;
+    check(someVeryLongVariableNameThatWillCauseLineBreaks > 0
+           && someVeryLongVariableNameThatWillCauseLineBreaks < 10);
   }
 }

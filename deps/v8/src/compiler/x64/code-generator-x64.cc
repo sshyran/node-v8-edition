@@ -187,11 +187,12 @@ class OutOfLineLoadFloat64NaN final : public OutOfLineCode {
 class OutOfLineTruncateDoubleToI final : public OutOfLineCode {
  public:
   OutOfLineTruncateDoubleToI(CodeGenerator* gen, Register result,
-                             XMMRegister input,
+                             XMMRegister input, StubCallMode stub_mode,
                              UnwindingInfoWriter* unwinding_info_writer)
       : OutOfLineCode(gen),
         result_(result),
         input_(input),
+        stub_mode_(stub_mode),
         unwinding_info_writer_(unwinding_info_writer),
         isolate_(gen->isolate()),
         zone_(gen->zone()) {}
@@ -201,7 +202,13 @@ class OutOfLineTruncateDoubleToI final : public OutOfLineCode {
     unwinding_info_writer_->MaybeIncreaseBaseOffsetAt(__ pc_offset(),
                                                       kDoubleSize);
     __ Movsd(MemOperand(rsp, 0), input_);
-    __ Call(BUILTIN_CODE(isolate_, DoubleToI), RelocInfo::CODE_TARGET);
+    if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
+      // A direct call to a wasm runtime stub defined in this module.
+      // Just encode the stub index. This will be patched at relocation.
+      __ near_call(wasm::WasmCode::kDoubleToI, RelocInfo::WASM_STUB_CALL);
+    } else {
+      __ Call(BUILTIN_CODE(isolate_, DoubleToI), RelocInfo::CODE_TARGET);
+    }
     __ movl(result_, MemOperand(rsp, 0));
     __ addp(rsp, Immediate(kDoubleSize));
     unwinding_info_writer_->MaybeIncreaseBaseOffsetAt(__ pc_offset(),
@@ -211,6 +218,7 @@ class OutOfLineTruncateDoubleToI final : public OutOfLineCode {
  private:
   Register const result_;
   XMMRegister const input_;
+  StubCallMode stub_mode_;
   UnwindingInfoWriter* const unwinding_info_writer_;
   Isolate* isolate_;
   Zone* zone_;
@@ -691,7 +699,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (HasImmediateInput(instr, 0)) {
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
-        if (info()->IsWasm()) {
+        if (DetermineStubCallMode() == StubCallMode::kCallWasmRuntimeStub) {
           __ near_call(wasm_code, constant.rmode());
         } else {
           if (HasCallDescriptorFlag(instr, CallDescriptor::kRetpoline)) {
@@ -743,7 +751,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (HasImmediateInput(instr, 0)) {
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
-        if (info()->IsWasm()) {
+        if (DetermineStubCallMode() == StubCallMode::kCallWasmRuntimeStub) {
           __ near_jmp(wasm_code, constant.rmode());
         } else {
           __ Move(kScratchRegister, wasm_code, constant.rmode());
@@ -925,7 +933,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       auto result = i.OutputRegister();
       auto input = i.InputDoubleRegister(0);
       auto ool = new (zone()) OutOfLineTruncateDoubleToI(
-          this, result, input, &unwinding_info_writer_);
+          this, result, input, DetermineStubCallMode(),
+          &unwinding_info_writer_);
       // We use Cvttsd2siq instead of Cvttsd2si due to performance reasons. The
       // use of Cvttsd2siq requires the movl below to avoid sign extension.
       __ Cvttsd2siq(result, input);
@@ -3090,8 +3099,10 @@ void CodeGenerator::AssembleConstructFrame() {
         __ set_has_frame(true);
         __ EnterFrame(StackFrame::WASM_COMPILED);
       }
+      __ movp(rcx, FieldOperand(kWasmInstanceRegister,
+                                WasmInstanceObject::kCEntryStubOffset));
       __ Move(rsi, Smi::kZero);
-      __ CallRuntimeDelayed(zone(), Runtime::kThrowWasmStackOverflow);
+      __ CallRuntimeWithCEntry(Runtime::kThrowWasmStackOverflow, rcx);
       ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
       RecordSafepoint(reference_map, Safepoint::kSimple, 0,
                       Safepoint::kNoLazyDeopt);
@@ -3258,6 +3269,23 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
         break;
     }
   };
+  // Helper function to write the given constant to the stack.
+  auto MoveConstantToSlot = [&](Operand dst, Constant src) {
+    if (!RelocInfo::IsWasmPtrReference(src.rmode())) {
+      switch (src.type()) {
+        case Constant::kInt32:
+          __ movq(dst, Immediate(src.ToInt32()));
+          return;
+        case Constant::kInt64:
+          __ Set(dst, src.ToInt64());
+          return;
+        default:
+          break;
+      }
+    }
+    MoveConstantToRegister(kScratchRegister, src);
+    __ movq(dst, kScratchRegister);
+  };
   // Dispatch on the source and destination operand kinds.
   switch (MoveType::InferMove(source, destination)) {
     case MoveType::kRegisterToRegister:
@@ -3345,8 +3373,7 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
       Constant src = g.ToConstant(source);
       Operand dst = g.ToOperand(destination);
       if (destination->IsStackSlot()) {
-        MoveConstantToRegister(kScratchRegister, src);
-        __ movq(dst, kScratchRegister);
+        MoveConstantToSlot(dst, src);
       } else {
         DCHECK(destination->IsFPStackSlot());
         if (src.type() == Constant::kFloat32) {

@@ -18,6 +18,8 @@ class DisjointAllocationPoolTest : public ::testing::Test {
   Address A(size_t n) { return static_cast<Address>(n); }
   void CheckLooksLike(const DisjointAllocationPool& mem,
                       std::vector<std::pair<size_t, size_t>> expectation);
+  void CheckLooksLike(AddressRange range,
+                      std::pair<size_t, size_t> expectation);
   DisjointAllocationPool Make(std::vector<std::pair<size_t, size_t>> model);
 };
 
@@ -28,127 +30,111 @@ void DisjointAllocationPoolTest::CheckLooksLike(
   CHECK_EQ(ranges.size(), expectation.size());
   auto iter = expectation.begin();
   for (auto it = ranges.begin(), e = ranges.end(); it != e; ++it, ++iter) {
-    CHECK_EQ(it->first, A(iter->first));
-    CHECK_EQ(it->second, A(iter->second));
+    CheckLooksLike(*it, *iter);
   }
+}
+
+void DisjointAllocationPoolTest::CheckLooksLike(
+    AddressRange range, std::pair<size_t, size_t> expectation) {
+  CHECK_EQ(range.start, A(expectation.first));
+  CHECK_EQ(range.end, A(expectation.second));
 }
 
 DisjointAllocationPool DisjointAllocationPoolTest::Make(
     std::vector<std::pair<size_t, size_t>> model) {
   DisjointAllocationPool ret;
   for (auto& pair : model) {
-    ret.Merge(DisjointAllocationPool(A(pair.first), A(pair.second)));
+    ret.Merge({A(pair.first), A(pair.second)});
   }
   return ret;
 }
 
-TEST_F(DisjointAllocationPoolTest, Construct) {
+TEST_F(DisjointAllocationPoolTest, ConstructEmpty) {
   DisjointAllocationPool a;
   CHECK(a.IsEmpty());
-  CHECK_EQ(a.ranges().size(), 0);
-  DisjointAllocationPool b = Make({{1, 5}});
-  CHECK(!b.IsEmpty());
-  CHECK_EQ(b.ranges().size(), 1);
-  a.Merge(std::move(b));
+  CheckLooksLike(a, {});
+  a.Merge({1, 5});
   CheckLooksLike(a, {{1, 5}});
-  DisjointAllocationPool c;
-  a.Merge(std::move(c));
+}
+
+TEST_F(DisjointAllocationPoolTest, ConstructWithRange) {
+  DisjointAllocationPool a({1, 5});
+  CHECK(!a.IsEmpty());
   CheckLooksLike(a, {{1, 5}});
-  DisjointAllocationPool e, f;
-  e.Merge(std::move(f));
-  CHECK(e.IsEmpty());
 }
 
 TEST_F(DisjointAllocationPoolTest, SimpleExtract) {
   DisjointAllocationPool a = Make({{1, 5}});
-  DisjointAllocationPool b = a.AllocatePool(2);
+  AddressRange b = a.Allocate(2);
   CheckLooksLike(a, {{3, 5}});
-  CheckLooksLike(b, {{1, 3}});
-  a.Merge(std::move(b));
+  CheckLooksLike(b, {1, 3});
+  a.Merge(b);
   CheckLooksLike(a, {{1, 5}});
   CHECK_EQ(a.ranges().size(), 1);
-  CHECK_EQ(a.ranges().front().first, A(1));
-  CHECK_EQ(a.ranges().front().second, A(5));
+  CHECK_EQ(a.ranges().front().start, A(1));
+  CHECK_EQ(a.ranges().front().end, A(5));
 }
 
 TEST_F(DisjointAllocationPoolTest, ExtractAll) {
-  DisjointAllocationPool a(A(1), A(5));
-  DisjointAllocationPool b = a.AllocatePool(4);
-  CheckLooksLike(b, {{1, 5}});
+  DisjointAllocationPool a({A(1), A(5)});
+  AddressRange b = a.Allocate(4);
+  CheckLooksLike(b, {1, 5});
   CHECK(a.IsEmpty());
-  a.Merge(std::move(b));
+  a.Merge(b);
   CheckLooksLike(a, {{1, 5}});
-}
-
-TEST_F(DisjointAllocationPoolTest, ExtractAccross) {
-  DisjointAllocationPool a = Make({{1, 5}, {10, 20}});
-  DisjointAllocationPool b = a.AllocatePool(5);
-  CheckLooksLike(a, {{11, 20}});
-  CheckLooksLike(b, {{1, 5}, {10, 11}});
-  a.Merge(std::move(b));
-  CheckLooksLike(a, {{1, 5}, {10, 20}});
-}
-
-TEST_F(DisjointAllocationPoolTest, ReassembleOutOfOrder) {
-  DisjointAllocationPool a = Make({{1, 5}, {10, 15}});
-  DisjointAllocationPool b = Make({{7, 8}, {20, 22}});
-  a.Merge(std::move(b));
-  CheckLooksLike(a, {{1, 5}, {7, 8}, {10, 15}, {20, 22}});
-
-  DisjointAllocationPool c = Make({{1, 5}, {10, 15}});
-  DisjointAllocationPool d = Make({{7, 8}, {20, 22}});
-  d.Merge(std::move(c));
-  CheckLooksLike(d, {{1, 5}, {7, 8}, {10, 15}, {20, 22}});
 }
 
 TEST_F(DisjointAllocationPoolTest, FailToExtract) {
   DisjointAllocationPool a = Make({{1, 5}});
-  DisjointAllocationPool b = a.AllocatePool(5);
+  AddressRange b = a.Allocate(5);
   CheckLooksLike(a, {{1, 5}});
-  CHECK(b.IsEmpty());
+  CHECK(b.is_empty());
 }
 
 TEST_F(DisjointAllocationPoolTest, FailToExtractExact) {
   DisjointAllocationPool a = Make({{1, 5}, {10, 14}});
-  DisjointAllocationPool b = a.Allocate(5);
+  AddressRange b = a.Allocate(5);
   CheckLooksLike(a, {{1, 5}, {10, 14}});
-  CHECK(b.IsEmpty());
+  CHECK(b.is_empty());
 }
 
 TEST_F(DisjointAllocationPoolTest, ExtractExact) {
   DisjointAllocationPool a = Make({{1, 5}, {10, 15}});
-  DisjointAllocationPool b = a.Allocate(5);
+  AddressRange b = a.Allocate(5);
   CheckLooksLike(a, {{1, 5}});
-  CheckLooksLike(b, {{10, 15}});
+  CheckLooksLike(b, {10, 15});
 }
 
 TEST_F(DisjointAllocationPoolTest, Merging) {
   DisjointAllocationPool a = Make({{10, 15}, {20, 25}});
-  a.Merge(Make({{15, 20}}));
+  a.Merge({15, 20});
   CheckLooksLike(a, {{10, 25}});
 }
 
 TEST_F(DisjointAllocationPoolTest, MergingMore) {
   DisjointAllocationPool a = Make({{10, 15}, {20, 25}, {30, 35}});
-  a.Merge(Make({{15, 20}, {25, 30}}));
+  a.Merge({15, 20});
+  a.Merge({25, 30});
   CheckLooksLike(a, {{10, 35}});
 }
 
 TEST_F(DisjointAllocationPoolTest, MergingSkip) {
   DisjointAllocationPool a = Make({{10, 15}, {20, 25}, {30, 35}});
-  a.Merge(Make({{25, 30}}));
+  a.Merge({25, 30});
   CheckLooksLike(a, {{10, 15}, {20, 35}});
 }
 
 TEST_F(DisjointAllocationPoolTest, MergingSkipLargerSrc) {
   DisjointAllocationPool a = Make({{10, 15}, {20, 25}, {30, 35}});
-  a.Merge(Make({{25, 30}, {35, 40}}));
+  a.Merge({25, 30});
+  a.Merge({35, 40});
   CheckLooksLike(a, {{10, 15}, {20, 40}});
 }
 
 TEST_F(DisjointAllocationPoolTest, MergingSkipLargerSrcWithGap) {
   DisjointAllocationPool a = Make({{10, 15}, {20, 25}, {30, 35}});
-  a.Merge(Make({{25, 30}, {36, 40}}));
+  a.Merge({25, 30});
+  a.Merge({36, 40});
   CheckLooksLike(a, {{10, 15}, {20, 35}, {36, 40}});
 }
 
@@ -159,30 +145,13 @@ class WasmCodeManagerTest : public TestWithContext,
  public:
   using NativeModulePtr = std::unique_ptr<NativeModule>;
 
-  // We pretend all our modules have 10 functions and no imports, just so
-  // we can size up the code_table.
-  NativeModulePtr AllocFixedModule(WasmCodeManager* manager, size_t size) {
-    wasm::ModuleEnv env(nullptr, UseTrapHandler::kNoTrapHandler,
-                        RuntimeExceptionSupport::kNoRuntimeExceptionSupport);
-    return manager->NewNativeModule(size, 10, 0, false, env);
-  }
-
-  NativeModulePtr AllocGrowableModule(WasmCodeManager* manager, size_t size) {
-    wasm::ModuleEnv env(nullptr, UseTrapHandler::kNoTrapHandler,
-                        RuntimeExceptionSupport::kNoRuntimeExceptionSupport);
-    return manager->NewNativeModule(size, 10, 0, true, env);
-  }
-
   NativeModulePtr AllocModule(WasmCodeManager* manager, size_t size,
                               ModuleStyle style) {
-    switch (style) {
-      case Fixed:
-        return AllocFixedModule(manager, size);
-      case Growable:
-        return AllocGrowableModule(manager, size);
-      default:
-        UNREACHABLE();
-    }
+    bool can_request_more = style == Growable;
+    wasm::ModuleEnv env(nullptr, UseTrapHandler::kNoTrapHandler,
+                        RuntimeExceptionSupport::kNoRuntimeExceptionSupport);
+    return manager->NewNativeModule(i_isolate(), size, 10, 0, can_request_more,
+                                    env);
   }
 
   WasmCode* AddCode(NativeModule* native_module, uint32_t index, size_t size) {
@@ -197,16 +166,13 @@ class WasmCodeManagerTest : public TestWithContext,
   }
 
   size_t page() const { return AllocatePageSize(); }
-  v8::Isolate* v8_isolate() const {
-    return reinterpret_cast<v8::Isolate*>(isolate());
-  }
 };
 
 INSTANTIATE_TEST_CASE_P(Parameterized, WasmCodeManagerTest,
                         ::testing::Values(Fixed, Growable));
 
 TEST_P(WasmCodeManagerTest, EmptyCase) {
-  WasmCodeManager manager(v8_isolate(), 0 * page());
+  WasmCodeManager manager(0 * page());
   CHECK_EQ(0, manager.remaining_uncommitted_code_space());
 
   NativeModulePtr native_module = AllocModule(&manager, 1 * page(), GetParam());
@@ -216,7 +182,7 @@ TEST_P(WasmCodeManagerTest, EmptyCase) {
 }
 
 TEST_P(WasmCodeManagerTest, AllocateAndGoOverLimit) {
-  WasmCodeManager manager(v8_isolate(), 1 * page());
+  WasmCodeManager manager(1 * page());
   CHECK_EQ(1 * page(), manager.remaining_uncommitted_code_space());
   NativeModulePtr native_module = AllocModule(&manager, 1 * page(), GetParam());
   CHECK(native_module);
@@ -240,7 +206,7 @@ TEST_P(WasmCodeManagerTest, AllocateAndGoOverLimit) {
 }
 
 TEST_P(WasmCodeManagerTest, TotalLimitIrrespectiveOfModuleCount) {
-  WasmCodeManager manager(v8_isolate(), 1 * page());
+  WasmCodeManager manager(1 * page());
   NativeModulePtr nm1 = AllocModule(&manager, 1 * page(), GetParam());
   NativeModulePtr nm2 = AllocModule(&manager, 1 * page(), GetParam());
   CHECK(nm1);
@@ -252,8 +218,8 @@ TEST_P(WasmCodeManagerTest, TotalLimitIrrespectiveOfModuleCount) {
 }
 
 TEST_P(WasmCodeManagerTest, DifferentHeapsApplyLimitsIndependently) {
-  WasmCodeManager manager1(v8_isolate(), 1 * page());
-  WasmCodeManager manager2(v8_isolate(), 2 * page());
+  WasmCodeManager manager1(1 * page());
+  WasmCodeManager manager2(2 * page());
   NativeModulePtr nm1 = AllocModule(&manager1, 1 * page(), GetParam());
   NativeModulePtr nm2 = AllocModule(&manager2, 1 * page(), GetParam());
   CHECK(nm1);
@@ -266,10 +232,10 @@ TEST_P(WasmCodeManagerTest, DifferentHeapsApplyLimitsIndependently) {
 }
 
 TEST_P(WasmCodeManagerTest, GrowingVsFixedModule) {
-  WasmCodeManager manager(v8_isolate(), 3 * page());
+  WasmCodeManager manager(3 * page());
   NativeModulePtr nm = AllocModule(&manager, 1 * page(), GetParam());
   if (GetParam() == Fixed) {
-    ASSERT_DEATH_IF_SUPPORTED(AddCode(nm.get(), 0, 1 * page() + kCodeAlignment),
+    ASSERT_DEATH_IF_SUPPORTED(AddCode(nm.get(), 0, kMaxWasmCodeMemory + 1),
                               "OOM in NativeModule::AddOwnedCode");
   } else {
     CHECK_NOT_NULL(AddCode(nm.get(), 0, 1 * page() + kCodeAlignment));
@@ -278,7 +244,7 @@ TEST_P(WasmCodeManagerTest, GrowingVsFixedModule) {
 }
 
 TEST_P(WasmCodeManagerTest, CommitIncrements) {
-  WasmCodeManager manager(v8_isolate(), 10 * page());
+  WasmCodeManager manager(10 * page());
   NativeModulePtr nm = AllocModule(&manager, 3 * page(), GetParam());
   WasmCode* code = AddCode(nm.get(), 0, kCodeAlignment);
   CHECK_NOT_NULL(code);
@@ -292,7 +258,7 @@ TEST_P(WasmCodeManagerTest, CommitIncrements) {
 }
 
 TEST_P(WasmCodeManagerTest, Lookup) {
-  WasmCodeManager manager(v8_isolate(), 2 * page());
+  WasmCodeManager manager(2 * page());
 
   NativeModulePtr nm1 = AllocModule(&manager, 1 * page(), GetParam());
   NativeModulePtr nm2 = AllocModule(&manager, 1 * page(), GetParam());
@@ -331,8 +297,8 @@ TEST_P(WasmCodeManagerTest, Lookup) {
 }
 
 TEST_P(WasmCodeManagerTest, MultiManagerLookup) {
-  WasmCodeManager manager1(v8_isolate(), 2 * page());
-  WasmCodeManager manager2(v8_isolate(), 2 * page());
+  WasmCodeManager manager1(2 * page());
+  WasmCodeManager manager2(2 * page());
 
   NativeModulePtr nm1 = AllocModule(&manager1, 1 * page(), GetParam());
   NativeModulePtr nm2 = AllocModule(&manager2, 1 * page(), GetParam());
@@ -354,7 +320,7 @@ TEST_P(WasmCodeManagerTest, MultiManagerLookup) {
 }
 
 TEST_P(WasmCodeManagerTest, LookupWorksAfterRewrite) {
-  WasmCodeManager manager(v8_isolate(), 2 * page());
+  WasmCodeManager manager(2 * page());
 
   NativeModulePtr nm1 = AllocModule(&manager, 1 * page(), GetParam());
 

@@ -237,8 +237,10 @@ Handle<Cell> PropertyAccessInfo::export_cell() const {
 }
 
 AccessInfoFactory::AccessInfoFactory(CompilationDependencies* dependencies,
+                                     const JSHeapBroker* js_heap_broker,
                                      Handle<Context> native_context, Zone* zone)
     : dependencies_(dependencies),
+      js_heap_broker_(js_heap_broker),
       native_context_(native_context),
       isolate_(native_context->GetIsolate()),
       type_cache_(TypeCache::Get()),
@@ -298,7 +300,8 @@ bool AccessInfoFactory::ComputeElementAccessInfos(
       if (transition_target == nullptr) {
         receiver_maps.push_back(map);
       } else {
-        transitions.push_back(std::make_pair(map, handle(transition_target)));
+        transitions.push_back(
+            std::make_pair(map, handle(transition_target, isolate())));
       }
     }
   }
@@ -398,8 +401,8 @@ bool AccessInfoFactory::ComputePropertyAccessInfo(
               dependencies()->AssumeFieldOwner(field_owner_map);
 
               // Remember the field map, and try to infer a useful type.
-              field_type =
-                  Type::For(isolate(), descriptors_field_type->AsClass());
+              field_type = Type::For(js_heap_broker(),
+                                     descriptors_field_type->AsClass());
               field_map = descriptors_field_type->AsClass();
             }
           }
@@ -663,7 +666,7 @@ bool AccessInfoFactory::LookupTransition(Handle<Map> map, Handle<Name> name,
                                          PropertyAccessInfo* access_info) {
   // Check if the {map} has a data transition with the given {name}.
   Map* transition =
-      TransitionsAccessor(isolate_, map).SearchTransition(*name, kData, NONE);
+      TransitionsAccessor(isolate(), map).SearchTransition(*name, kData, NONE);
   if (transition == nullptr) return false;
 
   Handle<Map> transition_map(transition);
@@ -704,7 +707,8 @@ bool AccessInfoFactory::LookupTransition(Handle<Map> map, Handle<Name> name,
       dependencies()->AssumeFieldOwner(field_owner_map);
 
       // Remember the field map, and try to infer a useful type.
-      field_type = Type::For(isolate(), descriptors_field_type->AsClass());
+      field_type =
+          Type::For(js_heap_broker(), descriptors_field_type->AsClass());
       field_map = descriptors_field_type->AsClass();
     }
   }

@@ -43,6 +43,7 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, raw_start_position_and_type,
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, raw_start_position_and_type,
                     is_toplevel, SharedFunctionInfo::IsTopLevelBit)
 
+INT_ACCESSORS(SharedFunctionInfo, function_literal_id, kFunctionLiteralIdOffset)
 #if V8_SFI_HAS_UNIQUE_ID
 INT_ACCESSORS(SharedFunctionInfo, unique_id, kUniqueIdOffset)
 #endif
@@ -364,8 +365,8 @@ ScopeInfo* SharedFunctionInfo::GetOuterScopeInfo() const {
 void SharedFunctionInfo::set_outer_scope_info(HeapObject* value,
                                               WriteBarrierMode mode) {
   DCHECK(!is_compiled());
-  DCHECK(raw_outer_scope_info_or_feedback_metadata()->IsTheHole(GetIsolate()));
-  DCHECK(value->IsScopeInfo() || value->IsTheHole(GetIsolate()));
+  DCHECK(raw_outer_scope_info_or_feedback_metadata()->IsTheHole());
+  DCHECK(value->IsScopeInfo() || value->IsTheHole());
   return set_raw_outer_scope_info_or_feedback_metadata(value, mode);
 }
 
@@ -544,13 +545,12 @@ String* SharedFunctionInfo::inferred_name() {
   if (HasInferredName()) {
     return String::cast(function_identifier());
   }
-  DCHECK(function_identifier()->IsUndefined(GetIsolate()) ||
-         HasBuiltinFunctionId());
+  DCHECK(function_identifier()->IsUndefined() || HasBuiltinFunctionId());
   return GetHeap()->empty_string();
 }
 
 void SharedFunctionInfo::set_inferred_name(String* inferred_name) {
-  DCHECK(function_identifier()->IsUndefined(GetIsolate()) || HasInferredName());
+  DCHECK(function_identifier()->IsUndefined() || HasInferredName());
   set_function_identifier(inferred_name);
 }
 

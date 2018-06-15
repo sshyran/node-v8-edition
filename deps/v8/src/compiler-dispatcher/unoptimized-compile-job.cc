@@ -197,7 +197,7 @@ void UnoptimizedCompileJob::PrepareOnMainThread(Isolate* isolate) {
   parse_info_->set_end_position(shared_->EndPosition());
   parse_info_->set_unicode_cache(unicode_cache_.get());
   parse_info_->set_language_mode(shared_->language_mode());
-  parse_info_->set_function_literal_id(shared_->GetFunctionLiteralId(isolate));
+  parse_info_->set_function_literal_id(shared_->function_literal_id());
   if (V8_UNLIKELY(FLAG_runtime_stats)) {
     parse_info_->set_runtime_call_stats(new (parse_info_->zone())
                                             RuntimeCallStats());
@@ -206,7 +206,7 @@ void UnoptimizedCompileJob::PrepareOnMainThread(Isolate* isolate) {
   parser_.reset(new Parser(parse_info_.get()));
   MaybeHandle<ScopeInfo> outer_scope_info;
   if (shared_->HasOuterScopeInfo()) {
-    outer_scope_info = handle(shared_->GetOuterScopeInfo());
+    outer_scope_info = handle(shared_->GetOuterScopeInfo(), isolate);
   }
   parser_->DeserializeScopeChain(isolate, parse_info_.get(), outer_scope_info);
 
@@ -288,8 +288,7 @@ void UnoptimizedCompileJob::FinalizeOnMainThread(Isolate* isolate) {
     // Internalize ast values onto the heap.
     parse_info_->ast_value_factory()->Internalize(isolate);
     // Allocate scope infos for the literal.
-    DeclarationScope::AllocateScopeInfos(parse_info_.get(), isolate,
-                                         AnalyzeMode::kRegular);
+    DeclarationScope::AllocateScopeInfos(parse_info_.get(), isolate);
     if (compilation_job_->state() == CompilationJob::State::kFailed ||
         !Compiler::FinalizeCompilationJob(compilation_job_.release(), shared_,
                                           isolate)) {

@@ -923,7 +923,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kArchTruncateDoubleToI:
       __ TruncateDoubleToI(isolate(), zone(), i.OutputRegister(),
-                           i.InputDoubleRegister(0));
+                           i.InputDoubleRegister(0), DetermineStubCallMode());
       DCHECK_EQ(LeaveCC, i.OutputSBit());
       break;
     case kArchStoreWithWriteBarrier: {
@@ -2973,8 +2973,10 @@ void CodeGenerator::AssembleConstructFrame() {
           // runtime call.
           __ EnterFrame(StackFrame::WASM_COMPILED);
         }
+        __ ldr(r2, FieldMemOperand(kWasmInstanceRegister,
+                                   WasmInstanceObject::kCEntryStubOffset));
         __ Move(cp, Smi::kZero);
-        __ CallRuntimeDelayed(zone(), Runtime::kThrowWasmStackOverflow);
+        __ CallRuntimeWithCEntry(Runtime::kThrowWasmStackOverflow, r2);
         // We come from WebAssembly, there are no references for the GC.
         ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
         RecordSafepoint(reference_map, Safepoint::kSimple, 0,
@@ -3090,6 +3092,8 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
       } else {
         __ Move(dst, src_object);
       }
+    } else if (src.type() == Constant::kExternalReference) {
+      __ Move(dst, src.ToExternalReference());
     } else {
       __ mov(dst, g.ToImmediate(source));
     }

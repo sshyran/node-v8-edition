@@ -10,7 +10,7 @@ class GraphMultiView extends View {
   graph: GraphView;
   schedule: ScheduleView;
   selectMenu: HTMLSelectElement;
-  currentPhaseView: View;
+  currentPhaseView: View & PhaseView;
 
   createViewElement() {
     const pane = document.createElement('div');
@@ -23,19 +23,15 @@ class GraphMultiView extends View {
     const view = this;
     view.sourceResolver = sourceResolver;
     view.selectionBroker = selectionBroker;
+    const searchInput = document.getElementById("search-input") as HTMLInputElement;
+    searchInput.addEventListener("keyup", e => {
+      if (!view.currentPhaseView) return;
+      view.currentPhaseView.searchInputAction(searchInput, e)
+    });
+    searchInput.setAttribute("value", window.sessionStorage.getItem("lastSearch") || "");
     this.graph = new GraphView(id, selectionBroker,
       (phaseName) => view.displayPhaseByName(phaseName));
     this.schedule = new ScheduleView(id, selectionBroker);
-
-
-    function handleSearch(e) {
-      if (this.currentPhaseView) {
-        this.currentPhaseView.searchInputAction(this.currentPhaseView, this, e)
-      }
-    }
-    const searchInput = document.getElementById("search-input");
-    searchInput.addEventListener("keyup", handleSearch);
-    searchInput.setAttribute("value", window.sessionStorage.getItem("lastSearch") || "");
     this.selectMenu = (<HTMLSelectElement>document.getElementById('display-selector'));
   }
 
@@ -47,7 +43,7 @@ class GraphMultiView extends View {
       optionElement.text = phase.name;
       view.selectMenu.add(optionElement);
     });
-    this.selectMenu.onchange = function (this:HTMLSelectElement) {
+    this.selectMenu.onchange = function (this: HTMLSelectElement) {
       window.sessionStorage.setItem("lastSelectedPhase", this.selectedIndex.toString());
       view.displayPhase(view.sourceResolver.getPhase(this.selectedIndex));
     }
@@ -62,7 +58,7 @@ class GraphMultiView extends View {
     this.displayPhase(this.sourceResolver.getPhase(initialPhaseIndex));
   }
 
-  initializeContent() {}
+  initializeContent() { }
 
   displayPhase(phase) {
     if (phase.type == 'graph') {
@@ -96,7 +92,7 @@ class GraphMultiView extends View {
   }
 
   onresize() {
-    if (this.graph) this.graph.fitGraphViewToWindow();
+    if (this.currentPhaseView) this.currentPhaseView.onresize();
   }
 
   deleteContent() {

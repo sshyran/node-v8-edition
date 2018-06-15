@@ -22,6 +22,9 @@ declare_args() {
   # Print to stdout on Android.
   v8_android_log_stdout = false
 
+  # Dynamically set an additional dependency from v8/custom_deps.
+  v8_custom_deps = ""
+
   # Turns on deprecation warnings for HeapObject::GetIsolate,
   # HeapObject::GetHeap, Handle(T* obj) and handle(T* obj).
   v8_deprecate_get_isolate = false
@@ -76,7 +79,8 @@ declare_args() {
   # TODO(jgruber,v8:6666): Support ia32 and maybe MSVC.
   # TODO(jgruber,v8:6666): Enable for remaining architectures once performance
   #                        regressions are addressed.
-  v8_enable_embedded_builtins = v8_current_cpu == "x64" && (!is_win || is_clang)
+  v8_enable_embedded_builtins =
+      v8_use_snapshot && v8_current_cpu == "x64" && (!is_win || is_clang)
 
   # Enable code-generation-time checking of types in the CodeStubAssembler.
   v8_enable_verify_csa = false
@@ -183,6 +187,9 @@ if (v8_check_microtasks_scopes_consistency == "") {
   v8_check_microtasks_scopes_consistency =
       v8_enable_debugging_features || dcheck_always_on
 }
+
+assert(!v8_enable_embedded_builtins || v8_use_snapshot,
+       "Embedded builtins only work with snapshots")
 
 # Specifies if the target build is a simulator build. Comparing target cpu
 # with v8 target cpu to not affect simulator builds for making cross-compile
@@ -865,6 +872,7 @@ action("postmortem-metadata") {
 torque_files = [
   "src/builtins/base.tq",
   "src/builtins/array.tq",
+  "src/builtins/array-foreach.tq",
   "src/builtins/typed-array.tq",
   "src/builtins/data-view.tq",
   "test/torque/test-torque.tq",
@@ -1303,6 +1311,8 @@ v8_source_set("v8_initializers") {
     "src/builtins/builtins-intl-gen.cc",
     "src/builtins/builtins-iterator-gen.cc",
     "src/builtins/builtins-iterator-gen.h",
+    "src/builtins/builtins-lazy-gen.cc",
+    "src/builtins/builtins-lazy-gen.h",
     "src/builtins/builtins-math-gen.cc",
     "src/builtins/builtins-math-gen.h",
     "src/builtins/builtins-number-gen.cc",
@@ -1693,6 +1703,8 @@ v8_source_set("v8_base") {
     "src/compiler/js-generic-lowering.h",
     "src/compiler/js-graph.cc",
     "src/compiler/js-graph.h",
+    "src/compiler/js-heap-broker.cc",
+    "src/compiler/js-heap-broker.h",
     "src/compiler/js-inlining-heuristic.cc",
     "src/compiler/js-inlining-heuristic.h",
     "src/compiler/js-inlining.cc",
@@ -1931,6 +1943,8 @@ v8_source_set("v8_base") {
     "src/heap/gc-idle-time-handler.h",
     "src/heap/gc-tracer.cc",
     "src/heap/gc-tracer.h",
+    "src/heap/heap-controller.cc",
+    "src/heap/heap-controller.h",
     "src/heap/heap-inl.h",
     "src/heap/heap.cc",
     "src/heap/heap.h",
@@ -2371,6 +2385,8 @@ v8_source_set("v8_base") {
     "src/trap-handler/handler-shared.cc",
     "src/trap-handler/trap-handler-internal.h",
     "src/trap-handler/trap-handler.h",
+    "src/turbo-assembler.cc",
+    "src/turbo-assembler.h",
     "src/type-hints.cc",
     "src/type-hints.h",
     "src/unicode-cache-inl.h",
@@ -2415,6 +2431,8 @@ v8_source_set("v8_base") {
     "src/wasm/function-body-decoder.h",
     "src/wasm/function-compiler.cc",
     "src/wasm/function-compiler.h",
+    "src/wasm/jump-table-assembler.cc",
+    "src/wasm/jump-table-assembler.h",
     "src/wasm/leb-helper.h",
     "src/wasm/local-decl-encoder.cc",
     "src/wasm/local-decl-encoder.h",
@@ -2945,7 +2963,6 @@ v8_component("v8_libbase") {
       "src/base/debug/stack_trace_fuchsia.cc",
       "src/base/platform/platform-fuchsia.cc",
     ]
-    public_deps += [ "//third_party/fuchsia-sdk:launchpad" ]
   } else if (is_mac) {
     sources += [
       "src/base/debug/stack_trace_posix.cc",
@@ -3186,6 +3203,11 @@ group("gn_all") {
     "test:gn_all",
     "tools:gn_all",
   ]
+
+  if (v8_custom_deps != "") {
+    # Custom dependency from directory under v8/custom_deps.
+    deps += [ v8_custom_deps ]
+  }
 
   if (want_v8_shell) {
     deps += [ ":v8_shell" ]

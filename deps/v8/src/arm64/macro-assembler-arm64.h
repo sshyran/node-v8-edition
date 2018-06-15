@@ -11,6 +11,7 @@
 #include "src/bailout-reason.h"
 #include "src/base/bits.h"
 #include "src/globals.h"
+#include "src/turbo-assembler.h"
 
 // Simulator specific helpers.
 #if USE_SIMULATOR
@@ -172,10 +173,14 @@ enum PreShiftImmMode {
   kAnyShift          // Allow any pre-shift.
 };
 
-class TurboAssembler : public Assembler {
+class TurboAssembler : public TurboAssemblerBase {
  public:
   TurboAssembler(Isolate* isolate, void* buffer, int buffer_size,
-                 CodeObjectRequired create_code_object);
+                 CodeObjectRequired create_code_object)
+      : TurboAssemblerBase(isolate, buffer, buffer_size, create_code_object) {}
+
+  TurboAssembler(IsolateData isolate_data, void* buffer, int buffer_size)
+      : TurboAssemblerBase(isolate_data, buffer, buffer_size) {}
 
   // The Abort method should call a V8 runtime function, but the CallRuntime
   // mechanism depends on CEntry. If use_real_aborts is false, Abort will
@@ -197,16 +202,6 @@ class TurboAssembler : public Assembler {
     bool saved_;
     TurboAssembler* tasm_;
   };
-
-  void set_has_frame(bool value) { has_frame_ = value; }
-  bool has_frame() const { return has_frame_; }
-
-  Isolate* isolate() const { return isolate_; }
-
-  Handle<HeapObject> CodeObject() {
-    DCHECK(!code_object_.is_null());
-    return code_object_;
-  }
 
 #if DEBUG
   void set_allow_macro_instructions(bool value) {
@@ -568,9 +563,10 @@ class TurboAssembler : public Assembler {
 
   bool AllowThisStubCall(CodeStub* stub);
   void CallStubDelayed(CodeStub* stub);
-  // TODO(jgruber): Remove in favor of MacroAssembler::CallRuntime.
-  void CallRuntimeDelayed(Zone* zone, Runtime::FunctionId fid,
-                          SaveFPRegsMode save_doubles = kDontSaveFPRegs);
+
+  // Call a runtime routine. This expects {centry} to contain a fitting CEntry
+  // builtin for the target runtime function and uses an indirect call.
+  void CallRuntimeWithCEntry(Runtime::FunctionId fid, Register centry);
 
   // Removes current frame and its arguments from the stack preserving
   // the arguments and a return address pushed to the stack for the next call.
@@ -879,10 +875,12 @@ class TurboAssembler : public Assembler {
   void Movi(const VRegister& vd, uint64_t hi, uint64_t lo);
 
 #ifdef V8_EMBEDDED_BUILTINS
-  void LookupConstant(Register destination, Handle<HeapObject> object);
-  void LookupExternalReference(Register destination,
-                               ExternalReference reference);
-  void LoadBuiltin(Register destination, int builtin_index);
+  void LoadFromConstantsTable(Register destination,
+                              int constant_index) override;
+  void LoadExternalReference(Register destination,
+                             int reference_index) override;
+  void LoadBuiltin(Register destination, int builtin_index) override;
+  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
 #endif  // V8_EMBEDDED_BUILTINS
 
   void Jump(Register target, Condition cond = al);
@@ -921,7 +919,7 @@ class TurboAssembler : public Assembler {
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32.
   // Exits with 'result' holding the answer.
   void TruncateDoubleToI(Isolate* isolate, Zone* zone, Register result,
-                         DoubleRegister double_input);
+                         DoubleRegister double_input, StubCallMode stub_mode);
 
   inline void Mul(const Register& rd, const Register& rn, const Register& rm);
 
@@ -1164,7 +1162,7 @@ class TurboAssembler : public Assembler {
 #undef DECLARE_FUNCTION
 
   // Load an object from the root table.
-  void LoadRoot(CPURegister destination, Heap::RootListIndex index);
+  void LoadRoot(Register destination, Heap::RootListIndex index) override;
 
   inline void Ret(const Register& xn = lr);
 
@@ -1228,13 +1226,6 @@ class TurboAssembler : public Assembler {
 
   void ResetSpeculationPoisonRegister();
 
-  bool root_array_available() const { return root_array_available_; }
-  void set_root_array_available(bool v) { root_array_available_ = v; }
-
-  void set_builtin_index(int builtin_index) {
-    maybe_builtin_index_ = builtin_index;
-  }
-
  protected:
   // The actual Push and Pop implementations. These don't generate any code
   // other than that required for the push or pop. This allows
@@ -1267,27 +1258,20 @@ class TurboAssembler : public Assembler {
   // have mixed types. The format string (x0) should not be included.
   void CallPrintf(int arg_count = 0, const CPURegister* args = nullptr);
 
-  // This handle will be patched with the code object on installation.
-  Handle<HeapObject> code_object_;
-
  private:
-  int maybe_builtin_index_ = -1;  // May be set while generating builtins.
-  bool has_frame_ = false;
-  bool root_array_available_ = true;
-  Isolate* const isolate_;
 #if DEBUG
   // Tell whether any of the macro instruction can be used. When false the
   // MacroAssembler will assert if a method which can emit a variable number
   // of instructions is called.
-  bool allow_macro_instructions_;
+  bool allow_macro_instructions_ = true;
 #endif
 
 
   // Scratch registers available for use by the MacroAssembler.
-  CPURegList tmp_list_;
-  CPURegList fptmp_list_;
+  CPURegList tmp_list_ = DefaultTmpList();
+  CPURegList fptmp_list_ = DefaultFPTmpList();
 
-  bool use_real_aborts_;
+  bool use_real_aborts_ = true;
 
   // Helps resolve branching to labels potentially out of range.
   // If the label is not bound, it registers the information necessary to later

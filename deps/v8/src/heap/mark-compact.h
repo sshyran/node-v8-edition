@@ -415,6 +415,7 @@ class MajorNonAtomicMarkingState final
 struct WeakObjects {
   Worklist<WeakCell*, 64> weak_cells;
   Worklist<TransitionArray*, 64> transition_arrays;
+  Worklist<EphemeronHashTable*, 64> ephemeron_hash_tables;
   // TODO(marja): For old space, we only need the slot, not the host
   // object. Optimize this by adding a different storage for old space.
   Worklist<std::pair<HeapObject*, HeapObjectReference**>, 64> weak_references;
@@ -519,8 +520,19 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
     // Prints the stats about the global pool of the worklist.
     void PrintWorklist(const char* worklist_name,
                        ConcurrentMarkingWorklist* worklist);
+
+    // Worklist used for most objects.
     ConcurrentMarkingWorklist shared_;
+
+    // Concurrent marking uses this worklist to bail out of concurrently
+    // marking certain object types. These objects are handled later in a STW
+    // pause after concurrent marking has finished.
     ConcurrentMarkingWorklist bailout_;
+
+    // Concurrent marking uses this worklist to bail out of marking objects
+    // in new space's linear allocation area. Used to avoid black allocation
+    // for new space. This allow the compiler to remove write barriers
+    // for freshly allocatd objects.
     ConcurrentMarkingWorklist on_hold_;
   };
 
@@ -571,9 +583,10 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
 
   void RecordRelocSlot(Code* host, RelocInfo* rinfo, Object* target);
   V8_INLINE static void RecordSlot(HeapObject* object, Object** slot,
-                                   Object* target);
+                                   HeapObject* target);
   V8_INLINE static void RecordSlot(HeapObject* object,
-                                   HeapObjectReference** slot, Object* target);
+                                   HeapObjectReference** slot,
+                                   HeapObject* target);
   void RecordLiveSlotsOnPage(Page* page);
 
   void UpdateSlots(SlotsBuffer* buffer);
@@ -605,6 +618,10 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
 
   void AddTransitionArray(TransitionArray* array) {
     weak_objects_.transition_arrays.Push(kMainThread, array);
+  }
+
+  void AddEphemeronHashTable(EphemeronHashTable* table) {
+    weak_objects_.ephemeron_hash_tables.Push(kMainThread, table);
   }
 
   void AddWeakReference(HeapObject* host, HeapObjectReference** slot) {
@@ -670,7 +687,7 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   void MarkStringTable(ObjectVisitor* visitor);
 
   // Marks object reachable from harmony weak maps and wrapper tracing.
-  void ProcessEphemeralMarking();
+  void ProcessEphemeronMarking();
 
   // If the call-site of the top optimized code was not prepared for
   // deoptimization, then treat embedded pointers in the code as strong as
@@ -684,9 +701,13 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   // if no concurrent threads are running.
   void ProcessMarkingWorklist() override;
 
+  // Drains the main thread marking work list. Will mark all pending objects
+  // if no concurrent threads are running.
+  void ProcessMarkingWorklistInParallel();
+
   // Callback function for telling whether the object *p is an unmarked
   // heap object.
-  static bool IsUnmarkedHeapObject(Object** p);
+  static bool IsUnmarkedHeapObject(Heap* heap, Object** p);
 
   // Clear non-live references in weak cells, transition and descriptor arrays,
   // and deoptimize dependent code of non-live maps.
@@ -714,10 +735,6 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   // with an unreachable key are removed from all encountered weak maps.
   // The linked list of all encountered weak maps is destroyed.
   void ClearWeakCollections();
-
-  // We have to remove all encountered weak maps from the list of weak
-  // collections when incremental marking is aborted.
-  void AbortWeakCollections();
 
   // Goes through the list of encountered weak cells and clears those with
   // dead values. If the value is a dead map and the parent map transitions to
@@ -752,6 +769,10 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
 
   void ClearMarkbitsInPagedSpace(PagedSpace* space);
   void ClearMarkbitsInNewSpace(NewSpace* space);
+
+  static const int kEphemeronChunkSize = 8 * KB;
+
+  int NumberOfParallelEphemeronVisitingTasks(size_t elements);
 
   base::Mutex mutex_;
   base::Semaphore page_parallel_job_semaphore_;
@@ -798,6 +819,7 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   MarkingState marking_state_;
   NonAtomicMarkingState non_atomic_marking_state_;
 
+  friend class EphemeronHashTableMarkingTask;
   friend class FullEvacuator;
   friend class Heap;
   friend class RecordMigratedSlotVisitor;
@@ -822,10 +844,10 @@ class MarkingVisitor final
   V8_INLINE int VisitAllocationSite(Map* map, AllocationSite* object);
   V8_INLINE int VisitBytecodeArray(Map* map, BytecodeArray* object);
   V8_INLINE int VisitCodeDataContainer(Map* map, CodeDataContainer* object);
+  V8_INLINE int VisitEphemeronHashTable(Map* map, EphemeronHashTable* object);
   V8_INLINE int VisitFixedArray(Map* map, FixedArray* object);
   V8_INLINE int VisitJSApiObject(Map* map, JSObject* object);
   V8_INLINE int VisitJSFunction(Map* map, JSFunction* object);
-  V8_INLINE int VisitJSWeakCollection(Map* map, JSWeakCollection* object);
   V8_INLINE int VisitMap(Map* map, Map* object);
   V8_INLINE int VisitNativeContext(Map* map, Context* object);
   V8_INLINE int VisitTransitionArray(Map* map, TransitionArray* object);

@@ -18,7 +18,6 @@ ACCESSORS(JSCollectionIterator, table, Object, kTableOffset)
 ACCESSORS(JSCollectionIterator, index, Object, kIndexOffset)
 
 ACCESSORS(JSWeakCollection, table, Object, kTableOffset)
-ACCESSORS(JSWeakCollection, next, Object, kNextOffset)
 
 CAST_ACCESSOR(JSSet)
 CAST_ACCESSOR(JSSetIterator)
@@ -32,7 +31,7 @@ Object* JSMapIterator::CurrentValue() {
   OrderedHashMap* table(OrderedHashMap::cast(this->table()));
   int index = Smi::ToInt(this->index());
   Object* value = table->ValueAt(index);
-  DCHECK(!value->IsTheHole(table->GetIsolate()));
+  DCHECK(!value->IsTheHole());
   return value;
 }
 

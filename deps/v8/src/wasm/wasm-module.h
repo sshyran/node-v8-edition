@@ -26,7 +26,6 @@ class WasmGlobalObject;
 class WasmInstanceObject;
 class WasmMemoryObject;
 class WasmModuleObject;
-class WasmSharedModuleData;
 class WasmTableObject;
 
 namespace compiler {
@@ -180,6 +179,8 @@ struct V8_EXPORT_PRIVATE WasmModule {
   void AddNameForTesting(int function_index, WireBytesRef name);
 };
 
+size_t EstimateWasmModuleSize(const WasmModule* module);
+
 // Interface to the storage (wire bytes) of a wasm module.
 // It is illegal for anyone receiving a ModuleWireBytes to store pointers based
 // on module_bytes, as this storage is only guaranteed to be alive as long as
@@ -260,7 +261,7 @@ V8_EXPORT_PRIVATE Handle<JSArray> GetCustomSections(
 // Decode local variable names from the names section. Return FixedArray of
 // FixedArray of <undefined|String>. The outer fixed array is indexed by the
 // function index, the inner one by the local index.
-Handle<FixedArray> DecodeLocalNames(Isolate*, Handle<WasmSharedModuleData>);
+Handle<FixedArray> DecodeLocalNames(Isolate*, Handle<WasmModuleObject>);
 
 // TruncatedUserString makes it easy to output names up to a certain length, and
 // output a truncation followed by '...' if they exceed a limit.

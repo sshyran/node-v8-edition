@@ -87,21 +87,73 @@ class JumpOptimizationInfo {
   std::vector<uint32_t> farjmp_bitmap_;
 };
 
+class HeapObjectRequest {
+ public:
+  explicit HeapObjectRequest(double heap_number, int offset = -1);
+  explicit HeapObjectRequest(CodeStub* code_stub, int offset = -1);
+
+  enum Kind { kHeapNumber, kCodeStub };
+  Kind kind() const { return kind_; }
+
+  double heap_number() const {
+    DCHECK_EQ(kind(), kHeapNumber);
+    return value_.heap_number;
+  }
+
+  CodeStub* code_stub() const {
+    DCHECK_EQ(kind(), kCodeStub);
+    return value_.code_stub;
+  }
+
+  // The code buffer offset at the time of the request.
+  int offset() const {
+    DCHECK_GE(offset_, 0);
+    return offset_;
+  }
+  void set_offset(int offset) {
+    DCHECK_LT(offset_, 0);
+    offset_ = offset;
+    DCHECK_GE(offset_, 0);
+  }
+
+ private:
+  Kind kind_;
+
+  union {
+    double heap_number;
+    CodeStub* code_stub;
+  } value_;
+
+  int offset_;
+};
+
 // -----------------------------------------------------------------------------
 // Platform independent assembler base class.
 
 enum class CodeObjectRequired { kNo, kYes };
 
-
-class AssemblerBase: public Malloced {
+class AssemblerBase : public Malloced {
  public:
+  enum SerializerEnabled : bool {
+    kSerializerEnabled = true,
+    kSerializerDisabled = false
+  };
   struct IsolateData {
     explicit IsolateData(Isolate* isolate);
-    IsolateData(const IsolateData&) = default;
 
-    bool serializer_enabled_;
-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
-    Address code_range_start_;
+#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
+    constexpr IsolateData(SerializerEnabled serializer_enabled,
+                          Address code_range_start)
+        : serializer_enabled(serializer_enabled),
+          code_range_start(code_range_start) {}
+#else
+    explicit constexpr IsolateData(SerializerEnabled serializer_enabled)
+        : serializer_enabled(serializer_enabled) {}
+#endif
+
+    SerializerEnabled serializer_enabled;
+#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
+    Address code_range_start;
 #endif
   };
 
@@ -110,8 +162,10 @@ class AssemblerBase: public Malloced {
 
   IsolateData isolate_data() const { return isolate_data_; }
 
-  bool serializer_enabled() const { return isolate_data_.serializer_enabled_; }
-  void enable_serializer() { isolate_data_.serializer_enabled_ = true; }
+  bool serializer_enabled() const { return isolate_data_.serializer_enabled; }
+  void enable_serializer() {
+    isolate_data_.serializer_enabled = kSerializerEnabled;
+  }
 
   bool emit_debug_code() const { return emit_debug_code_; }
   void set_emit_debug_code(bool value) { emit_debug_code_ = value; }
@@ -174,6 +228,10 @@ class AssemblerBase: public Malloced {
   byte* buffer_;
   int buffer_size_;
   bool own_buffer_;
+  std::forward_list<HeapObjectRequest> heap_object_requests_;
+  // The program counter, which points into the buffer above and moves forward.
+  // TODO(jkummerow): This should probably have type {Address}.
+  byte* pc_;
 
   void set_constant_pool_available(bool available) {
     if (FLAG_enable_embedded_constant_pool) {
@@ -184,9 +242,12 @@ class AssemblerBase: public Malloced {
     }
   }
 
-  // The program counter, which points into the buffer above and moves forward.
-  // TODO(jkummerow): This should probably have type {Address}.
-  byte* pc_;
+  // {RequestHeapObject} records the need for a future heap number allocation or
+  // code stub generation. After code assembly, each platform's
+  // {Assembler::AllocateAndInstallRequestedHeapObjects} will allocate these
+  // objects and place them where they are expected (determined by the pc offset
+  // associated with each request).
+  void RequestHeapObject(HeapObjectRequest request);
 
  private:
   IsolateData isolate_data_;
@@ -364,12 +425,15 @@ class RelocInfo {
   static const int kMaxSmallPCDelta;
 
   enum Mode : int8_t {
-    // Please note the order is important (see IsCodeTarget, IsGCRelocMode).
-    CODE_TARGET,
-    EMBEDDED_OBJECT,
-    WASM_CALL,
-    WASM_STUB_CALL,
+    // Please note the order is important (see IsRealRelocMode, IsCodeTarget,
+    // IsGCRelocMode, and IsShareableRelocMode predicates below).
+
+    CODE_TARGET,      // LAST_CODE_ENUM
+    EMBEDDED_OBJECT,  // LAST_GCED_ENUM
+
     JS_TO_WASM_CALL,
+    WASM_CALL,
+    WASM_STUB_CALL,  // FIRST_SHAREABLE_RELOC_MODE
 
     RUNTIME_ENTRY,
     COMMENT,
@@ -409,7 +473,7 @@ class RelocInfo {
     LAST_REAL_RELOC_MODE = VENEER_POOL,
     LAST_CODE_ENUM = CODE_TARGET,
     LAST_GCED_ENUM = EMBEDDED_OBJECT,
-    FIRST_SHAREABLE_RELOC_MODE = RUNTIME_ENTRY,
+    FIRST_SHAREABLE_RELOC_MODE = WASM_STUB_CALL,
   };
 
   STATIC_ASSERT(NUMBER_OF_MODES <= kBitsPerInt);
@@ -430,6 +494,11 @@ class RelocInfo {
   static inline bool IsCodeTarget(Mode mode) {
     return mode <= LAST_CODE_ENUM;
   }
+  // Is the relocation mode affected by GC?
+  static inline bool IsGCRelocMode(Mode mode) { return mode <= LAST_GCED_ENUM; }
+  static inline bool IsShareableRelocMode(Mode mode) {
+    return mode >= RelocInfo::FIRST_SHAREABLE_RELOC_MODE;
+  }
   static inline bool IsEmbeddedObject(Mode mode) {
     return mode == EMBEDDED_OBJECT;
   }
@@ -439,10 +508,6 @@ class RelocInfo {
   static inline bool IsWasmCall(Mode mode) { return mode == WASM_CALL; }
   static inline bool IsWasmStubCall(Mode mode) {
     return mode == WASM_STUB_CALL;
-  }
-  // Is the relocation mode affected by GC?
-  static inline bool IsGCRelocMode(Mode mode) {
-    return mode <= LAST_GCED_ENUM;
   }
   static inline bool IsComment(Mode mode) {
     return mode == COMMENT;
@@ -881,46 +946,6 @@ class ConstantPoolBuilder BASE_EMBEDDED {
 
   Label emitted_label_;  // Records pc_offset of emitted pool
   PerTypeEntryInfo info_[ConstantPoolEntry::NUMBER_OF_TYPES];
-};
-
-class HeapObjectRequest {
- public:
-  explicit HeapObjectRequest(double heap_number, int offset = -1);
-  explicit HeapObjectRequest(CodeStub* code_stub, int offset = -1);
-
-  enum Kind { kHeapNumber, kCodeStub };
-  Kind kind() const { return kind_; }
-
-  double heap_number() const {
-    DCHECK_EQ(kind(), kHeapNumber);
-    return value_.heap_number;
-  }
-
-  CodeStub* code_stub() const {
-    DCHECK_EQ(kind(), kCodeStub);
-    return value_.code_stub;
-  }
-
-  // The code buffer offset at the time of the request.
-  int offset() const {
-    DCHECK_GE(offset_, 0);
-    return offset_;
-  }
-  void set_offset(int offset) {
-    DCHECK_LT(offset_, 0);
-    offset_ = offset;
-    DCHECK_GE(offset_, 0);
-  }
-
- private:
-  Kind kind_;
-
-  union {
-    double heap_number;
-    CodeStub* code_stub;
-  } value_;
-
-  int offset_;
 };
 
 // Base type for CPU Registers.

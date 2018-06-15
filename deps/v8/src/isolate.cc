@@ -66,6 +66,18 @@
 namespace v8 {
 namespace internal {
 
+#ifdef DEBUG
+#define TRACE_ISOLATE(tag)                                                  \
+  do {                                                                      \
+    if (FLAG_trace_isolates) {                                              \
+      PrintF("Isolate %p (id %d)" #tag "\n", reinterpret_cast<void*>(this), \
+             id());                                                         \
+    }                                                                       \
+  } while (false)
+#else
+#define TRACE_ISOLATE(tag)
+#endif
+
 base::Atomic32 ThreadId::highest_thread_id_ = 0;
 
 #ifdef V8_EMBEDDED_BUILTINS
@@ -472,7 +484,7 @@ class FrameArrayBuilder {
         }
         Handle<WasmInstanceObject> instance = summary.wasm_instance();
         int flags = 0;
-        if (instance->module_object()->shared()->is_asm_js()) {
+        if (instance->module_object()->is_asm_js()) {
           flags |= FrameArray::kIsAsmJsWasmFrame;
           if (WasmCompiledFrame::cast(frame)->at_to_number_conversion()) {
             flags |= FrameArray::kAsmJsAtNumberConversion;
@@ -491,7 +503,7 @@ class FrameArrayBuilder {
         const auto& summary = summ.AsWasmInterpreted();
         Handle<WasmInstanceObject> instance = summary.wasm_instance();
         int flags = FrameArray::kIsWasmInterpretedFrame;
-        DCHECK(!instance->module_object()->shared()->is_asm_js());
+        DCHECK(!instance->module_object()->is_asm_js());
         elements_ = FrameArray::AppendWasmFrame(elements_, instance,
                                                 summary.function_index(), {},
                                                 summary.byte_offset(), flags);
@@ -804,10 +816,10 @@ class CaptureStackTraceHelper {
       const FrameSummary::WasmFrameSummary& summ) {
     Handle<StackFrameInfo> info = factory()->NewStackFrameInfo();
 
-    Handle<WasmSharedModuleData> shared(
-        summ.wasm_instance()->module_object()->shared(), isolate_);
-    Handle<String> name = WasmSharedModuleData::GetFunctionName(
-        isolate_, shared, summ.function_index());
+    Handle<WasmModuleObject> module_object(
+        summ.wasm_instance()->module_object(), isolate_);
+    Handle<String> name = WasmModuleObject::GetFunctionName(
+        isolate_, module_object, summ.function_index());
     info->set_function_name(*name);
     // Encode the function index as line number (1-based).
     info->set_line_number(summ.function_index() + 1);
@@ -1150,11 +1162,11 @@ bool Isolate::is_catchable_by_wasm(Object* exception) {
       .IsJust();
 }
 
-Object* Isolate::Throw(Object* exception, MessageLocation* location) {
+Object* Isolate::Throw(Object* raw_exception, MessageLocation* location) {
   DCHECK(!has_pending_exception());
 
   HandleScope scope(this);
-  Handle<Object> exception_handle(exception, this);
+  Handle<Object> exception(raw_exception, this);
 
   if (FLAG_print_all_exceptions) {
     printf("=========================================================\n");
@@ -1179,11 +1191,13 @@ Object* Isolate::Throw(Object* exception, MessageLocation* location) {
                Script::GetColumnNumber(script, location->start_pos()),
                Script::GetLineNumber(script, location->end_pos()) + 1,
                Script::GetColumnNumber(script, location->end_pos()));
+        // Make sure to update the raw exception pointer in case it moved.
+        raw_exception = *exception;
       } else {
         printf(", line %d\n", script->GetLineNumber(location->start_pos()) + 1);
       }
     }
-    exception->Print();
+    raw_exception->Print();
     printf("Stack Trace:\n");
     PrintStack(stdout);
     printf("=========================================================\n");
@@ -1205,8 +1219,8 @@ Object* Isolate::Throw(Object* exception, MessageLocation* location) {
   thread_local_top()->rethrowing_message_ = false;
 
   // Notify debugger of exception.
-  if (is_catchable_by_javascript(exception)) {
-    debug()->OnThrow(exception_handle);
+  if (is_catchable_by_javascript(raw_exception)) {
+    debug()->OnThrow(exception);
   }
 
   // Generate the message if required.
@@ -1221,9 +1235,9 @@ Object* Isolate::Throw(Object* exception, MessageLocation* location) {
       // It's not safe to try to make message objects or collect stack traces
       // while the bootstrapper is active since the infrastructure may not have
       // been properly initialized.
-      ReportBootstrappingException(exception_handle, location);
+      ReportBootstrappingException(exception, location);
     } else {
-      Handle<Object> message_obj = CreateMessage(exception_handle, location);
+      Handle<Object> message_obj = CreateMessage(exception, location);
       thread_local_top()->pending_message_obj_ = *message_obj;
 
       // For any exception not caught by JavaScript, even when an external
@@ -1252,7 +1266,7 @@ Object* Isolate::Throw(Object* exception, MessageLocation* location) {
   }
 
   // Set the exception being thrown.
-  set_pending_exception(*exception_handle);
+  set_pending_exception(*exception);
   return heap()->exception();
 }
 
@@ -1750,10 +1764,10 @@ bool Isolate::ComputeLocationFromStackTrace(MessageLocation* target,
       bool is_at_number_conversion =
           elements->IsAsmJsWasmFrame(i) &&
           elements->Flags(i)->value() & FrameArray::kAsmJsAtNumberConversion;
-      int pos = WasmSharedModuleData::GetSourcePosition(
-          handle(instance->module_object()->shared(), this), func_index,
-          byte_offset, is_at_number_conversion);
-      Handle<Script> script(instance->module_object()->shared()->script());
+      int pos = WasmModuleObject::GetSourcePosition(
+          handle(instance->module_object(), this), func_index, byte_offset,
+          is_at_number_conversion);
+      Handle<Script> script(instance->module_object()->script());
 
       *target = MessageLocation(script, pos, pos + 1);
       return true;
@@ -2366,19 +2380,6 @@ void Isolate::ThreadDataTable::RemoveAllThreads() {
   table_.clear();
 }
 
-
-#ifdef DEBUG
-#define TRACE_ISOLATE(tag)                                              \
-  do {                                                                  \
-    if (FLAG_trace_isolates) {                                          \
-      PrintF("Isolate %p (id %d)" #tag "\n",                            \
-             reinterpret_cast<void*>(this), id());                      \
-    }                                                                   \
-  } while (false)
-#else
-#define TRACE_ISOLATE(tag)
-#endif
-
 class VerboseAccountingAllocator : public AccountingAllocator {
  public:
   VerboseAccountingAllocator(Heap* heap, size_t allocation_sample_bytes,
@@ -2675,6 +2676,7 @@ void Isolate::Deinit() {
   delete compiler_dispatcher_;
   compiler_dispatcher_ = nullptr;
 
+  // This stops cancelable tasks (i.e. concurrent masking tasks)
   cancelable_task_manager()->CancelAndWait();
 
   heap_.TearDown();
@@ -2991,15 +2993,12 @@ bool Isolate::Init(StartupDeserializer* des) {
 
   // SetUp the object heap.
   DCHECK(!heap_.HasBeenSetUp());
-  if (!heap_.SetUp()) {
-    V8::FatalProcessOutOfMemory(this, "heap setup");
-    return false;
-  }
+  heap_.SetUp();
 
   // Setup the wasm engine. Currently, there's one per Isolate.
-  wasm_engine_.reset(new wasm::WasmEngine(
-      std::unique_ptr<wasm::WasmCodeManager>(new wasm::WasmCodeManager(
-          reinterpret_cast<v8::Isolate*>(this), kMaxWasmCodeMemory))));
+  wasm_engine_.reset(
+      new wasm::WasmEngine(std::unique_ptr<wasm::WasmCodeManager>(
+          new wasm::WasmCodeManager(kMaxWasmCodeMemory))));
   wasm_engine_->memory_tracker()->SetAllocationResultHistogram(
       counters()->wasm_memory_allocation_result());
   wasm_engine_->memory_tracker()->SetAddressSpaceUsageHistogram(
@@ -3235,7 +3234,7 @@ void Isolate::DumpAndResetStats() {
   if (turbo_statistics() != nullptr) {
     DCHECK(FLAG_turbo_stats || FLAG_turbo_stats_nvp);
 
-    OFStream os(stdout);
+    StdoutStream os;
     if (FLAG_turbo_stats) {
       AsPrintableStatistics ps = {*turbo_statistics(), false};
       os << ps << std::endl;
@@ -4200,5 +4199,8 @@ bool InterruptsScope::Intercept(StackGuard::InterruptFlag flag) {
   last_postpone_scope->intercepted_flags_ |= flag;
   return true;
 }
+
+#undef TRACE_ISOLATE
+
 }  // namespace internal
 }  // namespace v8

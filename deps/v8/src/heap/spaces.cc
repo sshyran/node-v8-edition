@@ -14,6 +14,7 @@
 #include "src/heap/array-buffer-tracker.h"
 #include "src/heap/concurrent-marking.h"
 #include "src/heap/gc-tracer.h"
+#include "src/heap/heap-controller.h"
 #include "src/heap/incremental-marking.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap/slot-set.h"
@@ -93,13 +94,11 @@ PauseAllocationObserversScope::~PauseAllocationObserversScope() {
 // -----------------------------------------------------------------------------
 // CodeRange
 
-CodeRange::CodeRange(Isolate* isolate)
+CodeRange::CodeRange(Isolate* isolate, size_t requested)
     : isolate_(isolate),
       free_list_(0),
       allocation_list_(0),
-      current_allocation_block_index_(0) {}
-
-bool CodeRange::SetUp(size_t requested) {
+      current_allocation_block_index_(0) {
   DCHECK(!virtual_memory_.IsReserved());
 
   if (requested == 0) {
@@ -109,7 +108,7 @@ bool CodeRange::SetUp(size_t requested) {
     if (kRequiresCodeRange) {
       requested = kMaximalCodeRangeSize;
     } else {
-      return true;
+      return;
     }
   }
 
@@ -128,7 +127,8 @@ bool CodeRange::SetUp(size_t requested) {
   if (!AlignedAllocVirtualMemory(
           requested, Max(kCodeRangeAreaAlignment, AllocatePageSize()),
           GetRandomMmapAddr(), &reservation)) {
-    return false;
+    V8::FatalProcessOutOfMemory(isolate,
+                                "CodeRange setup: allocate virtual memory");
   }
 
   // We are sure that we have mapped a block of requested addresses.
@@ -140,7 +140,7 @@ bool CodeRange::SetUp(size_t requested) {
   if (reserved_area > 0) {
     if (!reservation.SetPermissions(base, reserved_area,
                                     PageAllocator::kReadWrite))
-      return false;
+      V8::FatalProcessOutOfMemory(isolate, "CodeRange setup: set permissions");
 
     base += reserved_area;
   }
@@ -153,7 +153,6 @@ bool CodeRange::SetUp(size_t requested) {
       NewEvent("CodeRange", reinterpret_cast<void*>(reservation.address()),
                requested));
   virtual_memory_.TakeControl(&reservation);
-  return true;
 }
 
 bool CodeRange::CompareFreeBlockAddress(const FreeBlock& left,
@@ -267,26 +266,17 @@ void CodeRange::ReleaseBlock(const FreeBlock* block) {
 // MemoryAllocator
 //
 
-MemoryAllocator::MemoryAllocator(Isolate* isolate)
+MemoryAllocator::MemoryAllocator(Isolate* isolate, size_t capacity,
+                                 size_t code_range_size)
     : isolate_(isolate),
       code_range_(nullptr),
-      capacity_(0),
+      capacity_(RoundUp(capacity, Page::kPageSize)),
       size_(0),
       size_executable_(0),
       lowest_ever_allocated_(static_cast<Address>(-1ll)),
       highest_ever_allocated_(kNullAddress),
-      unmapper_(isolate->heap(), this) {}
-
-bool MemoryAllocator::SetUp(size_t capacity, size_t code_range_size) {
-  capacity_ = ::RoundUp(capacity, Page::kPageSize);
-
-  size_ = 0;
-  size_executable_ = 0;
-
-  code_range_ = new CodeRange(isolate_);
-  if (!code_range_->SetUp(code_range_size)) return false;
-
-  return true;
+      unmapper_(isolate->heap(), this) {
+  code_range_ = new CodeRange(isolate_, code_range_size);
 }
 
 
@@ -447,6 +437,21 @@ int MemoryAllocator::Unmapper::NumberOfChunks() {
     result += chunks_[i].size();
   }
   return static_cast<int>(result);
+}
+
+size_t MemoryAllocator::Unmapper::CommittedBufferedMemory() {
+  base::LockGuard<base::Mutex> guard(&mutex_);
+
+  size_t sum = 0;
+  // kPooled chunks are already uncommited. We only have to account for
+  // kRegular and kNonRegular chunks.
+  for (auto& chunk : chunks_[kRegular]) {
+    sum += chunk->size();
+  }
+  for (auto& chunk : chunks_[kNonRegular]) {
+    sum += chunk->size();
+  }
+  return sum;
 }
 
 bool MemoryAllocator::CommitMemory(Address base, size_t size) {
@@ -1443,13 +1448,6 @@ PagedSpace::PagedSpace(Heap* heap, AllocationSpace space,
   accounting_stats_.Clear();
 }
 
-
-bool PagedSpace::SetUp() { return true; }
-
-
-bool PagedSpace::HasBeenSetUp() { return true; }
-
-
 void PagedSpace::TearDown() {
   while (!memory_chunk_list_.Empty()) {
     MemoryChunk* chunk = memory_chunk_list_.front();
@@ -1988,23 +1986,24 @@ void PagedSpace::VerifyCountersBeforeConcurrentSweeping() {
 // -----------------------------------------------------------------------------
 // NewSpace implementation
 
-bool NewSpace::SetUp(size_t initial_semispace_capacity,
-                     size_t maximum_semispace_capacity) {
-  DCHECK(initial_semispace_capacity <= maximum_semispace_capacity);
-  DCHECK(base::bits::IsPowerOfTwo(
-      static_cast<uint32_t>(maximum_semispace_capacity)));
+NewSpace::NewSpace(Heap* heap, size_t initial_semispace_capacity,
+                   size_t max_semispace_capacity)
+    : SpaceWithLinearArea(heap, NEW_SPACE),
+      to_space_(heap, kToSpace),
+      from_space_(heap, kFromSpace),
+      reservation_() {
+  DCHECK(initial_semispace_capacity <= max_semispace_capacity);
+  DCHECK(
+      base::bits::IsPowerOfTwo(static_cast<uint32_t>(max_semispace_capacity)));
 
-  to_space_.SetUp(initial_semispace_capacity, maximum_semispace_capacity);
-  from_space_.SetUp(initial_semispace_capacity, maximum_semispace_capacity);
+  to_space_.SetUp(initial_semispace_capacity, max_semispace_capacity);
+  from_space_.SetUp(initial_semispace_capacity, max_semispace_capacity);
   if (!to_space_.Commit()) {
-    return false;
+    V8::FatalProcessOutOfMemory(heap->isolate(), "New space setup");
   }
   DCHECK(!from_space_.is_committed());  // No need to use memory yet.
   ResetLinearAllocationArea();
-
-  return true;
 }
-
 
 void NewSpace::TearDown() {
   allocation_info_.Reset(kNullAddress, kNullAddress);
@@ -2258,6 +2257,10 @@ bool NewSpace::EnsureAllocation(int size_in_bytes,
   return true;
 }
 
+size_t LargeObjectSpace::Available() {
+  return ObjectSizeFor(heap()->memory_allocator()->Available());
+}
+
 void SpaceWithLinearArea::StartNextInlineAllocationStep() {
   if (heap()->allocation_step_in_progress()) {
     // If we are mid-way through an existing step, don't start a new one.
@@ -2412,7 +2415,7 @@ bool SemiSpace::Commit() {
         heap()->memory_allocator()->AllocatePage<MemoryAllocator::kPooled>(
             Page::kAllocatableMemory, this, NOT_EXECUTABLE);
     if (new_page == nullptr) {
-      RewindPages(pages_added);
+      if (pages_added) RewindPages(pages_added);
       return false;
     }
     memory_chunk_list_.PushBack(new_page);
@@ -2469,7 +2472,7 @@ bool SemiSpace::GrowTo(size_t new_capacity) {
         heap()->memory_allocator()->AllocatePage<MemoryAllocator::kPooled>(
             Page::kAllocatableMemory, this, NOT_EXECUTABLE);
     if (new_page == nullptr) {
-      RewindPages(pages_added);
+      if (pages_added) RewindPages(pages_added);
       return false;
     }
     memory_chunk_list_.PushBack(new_page);
@@ -3136,9 +3139,8 @@ bool PagedSpace::RawSlowRefillLinearAllocationArea(int size_in_bytes) {
 void MapSpace::VerifyObject(HeapObject* object) { CHECK(object->IsMap()); }
 #endif
 
-ReadOnlySpace::ReadOnlySpace(Heap* heap, AllocationSpace id,
-                             Executability executable)
-    : PagedSpace(heap, id, executable),
+ReadOnlySpace::ReadOnlySpace(Heap* heap)
+    : PagedSpace(heap, RO_SPACE, NOT_EXECUTABLE),
       is_string_padding_cleared_(heap->isolate()->initialized_from_snapshot()) {
 }
 
@@ -3237,18 +3239,12 @@ HeapObject* LargeObjectIterator::Next() {
 // -----------------------------------------------------------------------------
 // LargeObjectSpace
 
-LargeObjectSpace::LargeObjectSpace(Heap* heap, AllocationSpace id)
-    : Space(heap, id),  // Managed on a per-allocation basis
+LargeObjectSpace::LargeObjectSpace(Heap* heap)
+    : Space(heap, LO_SPACE),  // Managed on a per-allocation basis
       size_(0),
       page_count_(0),
       objects_size_(0),
       chunk_map_(1024) {}
-
-LargeObjectSpace::~LargeObjectSpace() {}
-
-bool LargeObjectSpace::SetUp() {
-  return true;
-}
 
 void LargeObjectSpace::TearDown() {
   while (!memory_chunk_list_.Empty()) {
@@ -3259,7 +3255,6 @@ void LargeObjectSpace::TearDown() {
     memory_chunk_list_.Remove(page);
     heap()->memory_allocator()->Free<MemoryAllocator::kFull>(page);
   }
-  SetUp();
 }
 
 
@@ -3510,7 +3505,7 @@ void LargeObjectSpace::Verify() {
 
 #ifdef DEBUG
 void LargeObjectSpace::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   LargeObjectIterator it(this);
   for (HeapObject* obj = it.Next(); obj != nullptr; obj = it.Next()) {
     obj->Print(os);

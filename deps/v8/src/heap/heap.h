@@ -140,6 +140,7 @@ using v8::MemoryPressureLevel;
   V(Map, string_table_map, StringTableMap)                                     \
   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
   V(Map, weak_array_list_map, WeakArrayListMap)                                \
+  V(Map, ephemeron_hash_table_map, EphemeronHashTableMap)                      \
   /* String maps */                                                            \
   V(Map, native_source_string_map, NativeSourceStringMap)                      \
   V(Map, string_map, StringMap)                                                \
@@ -326,6 +327,7 @@ using v8::MemoryPressureLevel;
   V(CodeMap)                            \
   V(DebugEvaluateContextMap)            \
   V(DescriptorArrayMap)                 \
+  V(EphemeronHashTableMap)              \
   V(EmptyByteArray)                     \
   V(EmptyDescriptorArray)               \
   V(EmptyFixedArray)                    \
@@ -434,6 +436,7 @@ class GCIdleTimeAction;
 class GCIdleTimeHandler;
 class GCIdleTimeHeapState;
 class GCTracer;
+class HeapController;
 class HeapObjectAllocationTracker;
 class HeapObjectsFilter;
 class HeapStats;
@@ -471,7 +474,7 @@ enum class FixedArrayVisitationMode { kRegular, kIncremental };
 
 enum class TraceRetainingPathMode { kEnabled, kDisabled };
 
-enum class RetainingPathOption { kDefault, kTrackEphemeralPath };
+enum class RetainingPathOption { kDefault, kTrackEphemeronPath };
 
 enum class GarbageCollectionReason {
   kUnknown = 0,
@@ -594,6 +597,10 @@ class Heap {
 #undef DECL
 
 #define DECL(NAME, Name, Size, name) k##Name##Size##MapRootIndex,
+   ALLOCATION_SITE_LIST(DECL)
+#undef DECL
+
+#define DECL(NAME, Name, Size, name) k##Name##Size##MapRootIndex,
     DATA_HANDLER_LIST(DECL)
 #undef DECL
 
@@ -650,20 +657,8 @@ class Heap {
   static const size_t kMaxSemiSpaceSizeInKB =
       16 * kPointerMultiplier * ((1 << kPageSizeBits) / KB);
 
-  // The old space size has to be a multiple of Page::kPageSize.
-  // Sizes are in MB.
-  static const size_t kMinOldGenerationSize = 128 * kPointerMultiplier;
-  static const size_t kMaxOldGenerationSize = 1024 * kPointerMultiplier;
-
   static const int kTraceRingBufferSize = 512;
   static const int kStacktraceBufferSize = 512;
-
-  V8_EXPORT_PRIVATE static const double kMinHeapGrowingFactor;
-  V8_EXPORT_PRIVATE static const double kMaxHeapGrowingFactor;
-  static const double kMaxHeapGrowingFactorMemoryConstrained;
-  static const double kMaxHeapGrowingFactorIdle;
-  static const double kConservativeHeapGrowingFactor;
-  static const double kTargetMutatorUtilization;
 
   static const int kNoGCFlags = 0;
   static const int kReduceMemoryFootprintMask = 1;
@@ -744,12 +739,6 @@ class Heap {
     return "Unknown collector";
   }
 
-  V8_EXPORT_PRIVATE static double MaxHeapGrowingFactor(
-      size_t max_old_generation_size);
-  V8_EXPORT_PRIVATE static double HeapGrowingFactor(double gc_speed,
-                                                    double mutator_speed,
-                                                    double max_factor);
-
   // Copy block of memory from src to dst. Size of block should be aligned
   // by pointer size.
   static inline void CopyBlock(Address dst, Address src, int byte_size);
@@ -815,14 +804,6 @@ class Heap {
 
   // Used in CreateAllocationSiteStub and the (de)serializer.
   Object** allocation_sites_list_address() { return &allocation_sites_list_; }
-
-  void set_encountered_weak_collections(Object* weak_collection) {
-    encountered_weak_collections_ = weak_collection;
-  }
-  Object* encountered_weak_collections() const {
-    return encountered_weak_collections_;
-  }
-  void IterateEncounteredWeakCollections(RootVisitor* visitor);
 
   // Number of mark-sweeps.
   int ms_count() const { return ms_count_; }
@@ -987,15 +968,14 @@ class Heap {
   // max_semi_space_size_in_kb: maximum semi-space size in KB
   // max_old_generation_size_in_mb: maximum old generation size in MB
   // code_range_size_in_mb: code range size in MB
-  // Return false if the heap has been set up already.
-  bool ConfigureHeap(size_t max_semi_space_size_in_kb,
+  void ConfigureHeap(size_t max_semi_space_size_in_kb,
                      size_t max_old_generation_size_in_mb,
                      size_t code_range_size_in_mb);
-  bool ConfigureHeapDefault();
+  void ConfigureHeapDefault();
 
   // Prepares the heap, setting up memory areas that are needed in the isolate
   // without actually creating any objects.
-  bool SetUp();
+  void SetUp();
 
   // (Re-)Initialize hash seed from flag or RNG.
   void InitializeHashSeed();
@@ -1071,6 +1051,11 @@ class Heap {
   STRUCT_LIST(STRUCT_MAP_ACCESSOR)
 #undef STRUCT_MAP_ACCESSOR
 
+#define ALLOCATION_SITE_MAP_ACCESSOR(NAME, Name, Size, name) \
+  inline Map* name##_map();
+  ALLOCATION_SITE_LIST(ALLOCATION_SITE_MAP_ACCESSOR)
+#undef ALLOCATION_SITE_MAP_ACCESSOR
+
 #define DATA_HANDLER_MAP_ACCESSOR(NAME, Name, Size, name) \
   inline Map* name##_map();
   DATA_HANDLER_LIST(DATA_HANDLER_MAP_ACCESSOR)
@@ -1121,6 +1106,11 @@ class Heap {
 
   static constexpr int roots_to_builtins_offset() {
     return kRootsBuiltinsOffset;
+  }
+
+  Address root_register_addressable_end() {
+    return reinterpret_cast<Address>(roots_array_start()) +
+           kRootRegisterAddressableEndOffset;
   }
 
   // Sets the stub_cache_ (only used when expanding the dictionary).
@@ -1375,9 +1365,9 @@ class Heap {
   inline bool InNewSpace(Object* object);
   inline bool InNewSpace(MaybeObject* object);
   inline bool InNewSpace(HeapObject* heap_object);
-  inline bool InFromSpace(Object* object);
-  inline bool InFromSpace(MaybeObject* object);
-  inline bool InFromSpace(HeapObject* heap_object);
+  static inline bool InFromSpace(Object* object);
+  static inline bool InFromSpace(MaybeObject* object);
+  static inline bool InFromSpace(HeapObject* heap_object);
   inline bool InToSpace(Object* object);
   inline bool InToSpace(MaybeObject* object);
   inline bool InToSpace(HeapObject* heap_object);
@@ -1445,14 +1435,8 @@ class Heap {
   size_t InitialSemiSpaceSize() { return initial_semispace_size_; }
   size_t MaxOldGenerationSize() { return max_old_generation_size_; }
 
-  static size_t ComputeMaxOldGenerationSize(uint64_t physical_memory) {
-    const size_t old_space_physical_memory_factor = 4;
-    size_t computed_size = static_cast<size_t>(
-        physical_memory / i::MB / old_space_physical_memory_factor *
-        kPointerMultiplier);
-    return Max(Min(computed_size, kMaxOldGenerationSize),
-               kMinOldGenerationSize);
-  }
+  V8_EXPORT_PRIVATE static size_t ComputeMaxOldGenerationSize(
+      uint64_t physical_memory);
 
   static size_t ComputeMaxSemiSpaceSize(uint64_t physical_memory) {
     const uint64_t min_physical_memory = 512 * MB;
@@ -1475,6 +1459,10 @@ class Heap {
 
   // Returns the capacity of the old generation.
   size_t OldGenerationCapacity();
+
+  // Returns the amount of memory currently committed for the heap and memory
+  // held alive by the unmapper.
+  size_t CommittedMemoryOfHeapAndUnmapper();
 
   // Returns the amount of memory currently committed for the heap.
   size_t CommittedMemory();
@@ -2098,6 +2086,9 @@ class Heap {
   // Growing strategy. =========================================================
   // ===========================================================================
 
+  HeapController* heap_controller() { return heap_controller_; }
+  MemoryReducer* memory_reducer() { return memory_reducer_; }
+
   // For some webpages RAIL mode does not switch from PERFORMANCE_LOAD.
   // This constant limits the effect of load RAIL mode on GC.
   // The value is arbitrary and chosen as the largest load time observed in
@@ -2105,22 +2096,6 @@ class Heap {
   static const int kMaxLoadTimeMs = 7000;
 
   bool ShouldOptimizeForLoadTime();
-
-  // Decrease the allocation limit if the new limit based on the given
-  // parameters is lower than the current limit.
-  void DampenOldGenerationAllocationLimit(size_t old_gen_size, double gc_speed,
-                                          double mutator_speed);
-
-  // Calculates the allocation limit based on a given growing factor and a
-  // given old generation size.
-  size_t CalculateOldGenerationAllocationLimit(double factor,
-                                               size_t old_gen_size);
-
-  // Sets the allocation limit to trigger the next full garbage collection.
-  void SetOldGenerationAllocationLimit(size_t old_gen_size, double gc_speed,
-                                       double mutator_speed);
-
-  size_t MinimumAllocationLimitGrowingStep();
 
   size_t old_generation_allocation_limit() const {
     return old_generation_allocation_limit_;
@@ -2131,6 +2106,9 @@ class Heap {
   bool CanExpandOldGeneration(size_t size);
 
   bool ShouldExpandOldGenerationOnSlowAllocation();
+
+  enum class HeapGrowingMode { kDefault, kConservative, kMinimal };
+  HeapGrowingMode CurrentHeapGrowingMode();
 
   enum class IncrementalMarkingLimit { kNoLimit, kSoftLimit, kHardLimit };
   IncrementalMarkingLimit IncrementalMarkingLimitReached();
@@ -2216,7 +2194,7 @@ class Heap {
   // ===========================================================================
 
   void AddRetainer(HeapObject* retainer, HeapObject* object);
-  void AddEphemeralRetainer(HeapObject* retainer, HeapObject* object);
+  void AddEphemeronRetainer(HeapObject* retainer, HeapObject* object);
   void AddRetainingRoot(Root root, HeapObject* object);
   // Returns true if the given object is a target of retaining path tracking.
   // Stores the option corresponding to the object in the provided *option.
@@ -2255,6 +2233,12 @@ class Heap {
       kRootsExternalReferenceTableOffset +
       ExternalReferenceTable::SizeInBytes();
   Object* builtins_[Builtins::builtin_count];
+
+  // kRootRegister may be used to address any location that starts at the
+  // Isolate and ends at this point. Fields past this point are not guaranteed
+  // to live at a static offset from kRootRegister.
+  static constexpr int kRootRegisterAddressableEndOffset =
+      kRootsBuiltinsOffset + Builtins::builtin_count * kPointerSize;
 
   size_t code_range_size_;
   size_t max_semi_space_size_;
@@ -2368,11 +2352,6 @@ class Heap {
   Object* native_contexts_list_;
   Object* allocation_sites_list_;
 
-  // List of encountered weak collections (JSWeakMap and JSWeakSet) during
-  // marking. It is initialized during marking, destroyed after marking and
-  // contains Smi(0) while marking is not active.
-  Object* encountered_weak_collections_;
-
   std::vector<GCCallbackTuple> gc_epilogue_callbacks_;
   std::vector<GCCallbackTuple> gc_prologue_callbacks_;
 
@@ -2415,6 +2394,8 @@ class Heap {
   MemoryAllocator* memory_allocator_;
 
   StoreBuffer* store_buffer_;
+
+  HeapController* heap_controller_;
 
   IncrementalMarking* incremental_marking_;
   ConcurrentMarking* concurrent_marking_;
@@ -2511,7 +2492,7 @@ class Heap {
   std::map<HeapObject*, Root> retaining_root_;
   // If an object is retained by an ephemeron, then the retaining key of the
   // ephemeron is stored in this map.
-  std::map<HeapObject*, HeapObject*> ephemeral_retainer_;
+  std::map<HeapObject*, HeapObject*> ephemeron_retainer_;
   // For each index inthe retaining_path_targets_ array this map
   // stores the option of the corresponding target.
   std::map<int, RetainingPathOption> retaining_path_target_option_;
@@ -2521,8 +2502,10 @@ class Heap {
   // Classes in "heap" can be friends.
   friend class AlwaysAllocateScope;
   friend class ConcurrentMarking;
+  friend class EphemeronHashTableMarkingTask;
   friend class GCCallbacksScope;
   friend class GCTracer;
+  friend class HeapController;
   friend class HeapIterator;
   friend class IdleScavengeObserver;
   friend class IncrementalMarking;
@@ -2551,6 +2534,8 @@ class Heap {
 
   // Used in cctest.
   friend class heap::HeapTester;
+
+  FRIEND_TEST(HeapControllerTest, OldGenerationAllocationLimit);
 
   DISALLOW_COPY_AND_ASSIGN(Heap);
 };

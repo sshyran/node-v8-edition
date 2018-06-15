@@ -8,7 +8,6 @@
 #include "src/base/division-by-constant.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/bootstrapper.h"
-#include "src/builtins/constants-table-builder.h"
 #include "src/callable.h"
 #include "src/code-factory.h"
 #include "src/code-stubs.h"
@@ -20,7 +19,6 @@
 #include "src/instruction-stream.h"
 #include "src/objects-inl.h"
 #include "src/register-configuration.h"
-#include "src/snapshot/serializer-common.h"
 #include "src/snapshot/snapshot.h"
 #include "src/x64/assembler-x64.h"
 
@@ -79,15 +77,6 @@ MacroAssembler::MacroAssembler(Isolate* isolate, void* buffer, int size,
   }
 }
 
-TurboAssembler::TurboAssembler(Isolate* isolate, void* buffer, int buffer_size,
-                               CodeObjectRequired create_code_object)
-    : Assembler(isolate, buffer, buffer_size), isolate_(isolate) {
-  if (create_code_object == CodeObjectRequired::kYes) {
-    code_object_ = Handle<HeapObject>::New(
-        isolate->heap()->self_reference_marker(), isolate);
-  }
-}
-
 static const int64_t kInvalidRootRegisterDelta = -1;
 
 int64_t TurboAssembler::RootRegisterDelta(ExternalReference other) {
@@ -123,7 +112,7 @@ void MacroAssembler::Load(Register destination, ExternalReference source) {
   // Safe code.
 #ifdef V8_EMBEDDED_BUILTINS
   if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList()) {
-    LookupExternalReference(kScratchRegister, source);
+    IndirectLoadExternalReference(kScratchRegister, source);
     movp(destination, Operand(kScratchRegister, 0));
     return;
   }
@@ -155,66 +144,21 @@ void MacroAssembler::Store(ExternalReference destination, Register source) {
 }
 
 #ifdef V8_EMBEDDED_BUILTINS
-void TurboAssembler::LookupConstant(Register destination,
-                                    Handle<HeapObject> object) {
-  CHECK(isolate()->ShouldLoadConstantsFromRootList());
-  CHECK(root_array_available_);
-
-  // Before falling back to the (fairly slow) lookup from the constants table,
-  // check if any of the fast paths can be applied.
-  {
-    int builtin_index;
-    Heap::RootListIndex root_index;
-    if (isolate()->heap()->IsRootHandle(object, &root_index)) {
-      // Roots are loaded relative to the root register.
-      LoadRoot(destination, root_index);
-      return;
-    } else if (isolate()->builtins()->IsBuiltinHandle(object, &builtin_index)) {
-      // Similar to roots, builtins may be loaded from the builtins table.
-      LoadBuiltin(destination, builtin_index);
-      return;
-    } else if (object.is_identical_to(code_object_) &&
-               Builtins::IsBuiltinId(maybe_builtin_index_)) {
-      // The self-reference loaded through Codevalue() may also be a builtin
-      // and thus viable for a fast load.
-      LoadBuiltin(destination, maybe_builtin_index_);
-      return;
-    }
-  }
-
-  // Ensure the given object is in the builtins constants table and fetch its
-  // index.
-  BuiltinsConstantsTableBuilder* builder =
-      isolate()->builtins_constants_table_builder();
-  uint32_t index = builder->AddObject(object);
-
+void TurboAssembler::LoadFromConstantsTable(Register destination,
+                                            int constant_index) {
   DCHECK(isolate()->heap()->RootCanBeTreatedAsConstant(
       Heap::kBuiltinsConstantsTableRootIndex));
-
   LoadRoot(destination, Heap::kBuiltinsConstantsTableRootIndex);
-  movp(destination, FieldOperand(destination, FixedArray::kHeaderSize +
-                                                  index * kPointerSize));
+  movp(destination,
+       FieldOperand(destination,
+                    FixedArray::kHeaderSize + constant_index * kPointerSize));
 }
 
-void TurboAssembler::LookupExternalReference(Register destination,
-                                             ExternalReference reference) {
-  CHECK(reference.address() !=
-        ExternalReference::roots_array_start(isolate()).address());
-  CHECK(isolate()->ShouldLoadConstantsFromRootList());
-  CHECK(root_array_available_);
-
-  // Encode as an index into the external reference table stored on the isolate.
-
-  ExternalReferenceEncoder encoder(isolate());
-  ExternalReferenceEncoder::Value v = encoder.Encode(reference.address());
-  CHECK(!v.is_from_api());
-  uint32_t index = v.index();
-
-  // Generate code to load from the external reference table.
-
+void TurboAssembler::LoadExternalReference(Register destination,
+                                           int reference_index) {
   int32_t roots_to_external_reference_offset =
       Heap::roots_to_external_reference_table_offset() - kRootRegisterBias +
-      ExternalReferenceTable::OffsetOfEntry(index);
+      ExternalReferenceTable::OffsetOfEntry(reference_index);
 
   movp(destination, Operand(kRootRegister, roots_to_external_reference_offset));
 }
@@ -227,6 +171,16 @@ void TurboAssembler::LoadBuiltin(Register destination, int builtin_index) {
                                      builtin_index * kPointerSize;
 
   movp(destination, Operand(kRootRegister, roots_to_builtins_offset));
+}
+
+void TurboAssembler::LoadRootRegisterOffset(Register destination,
+                                            intptr_t offset) {
+  DCHECK(is_int32(offset));
+  if (offset == 0) {
+    Move(destination, kRootRegister);
+  } else {
+    leap(destination, Operand(kRootRegister, static_cast<int32_t>(offset)));
+  }
 }
 #endif  // V8_EMBEDDED_BUILTINS
 
@@ -242,7 +196,7 @@ void TurboAssembler::LoadAddress(Register destination,
   // Safe code.
 #ifdef V8_EMBEDDED_BUILTINS
   if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList()) {
-    LookupExternalReference(destination, source);
+    IndirectLoadExternalReference(destination, source);
     return;
   }
 #endif  // V8_EMBEDDED_BUILTINS
@@ -523,16 +477,15 @@ void TurboAssembler::CheckStackAlignment() {
 void TurboAssembler::Abort(AbortReason reason) {
 #ifdef DEBUG
   const char* msg = GetAbortReason(reason);
-  if (msg != nullptr) {
-    RecordComment("Abort message: ");
-    RecordComment(msg);
-  }
+  RecordComment("Abort message: ");
+  RecordComment(msg);
+#endif
 
-  if (FLAG_trap_on_abort) {
+  // Avoid emitting call to builtin if requested.
+  if (trap_on_abort()) {
     int3();
     return;
   }
-#endif
 
   Move(rdx, Smi::FromInt(static_cast<int>(reason)));
 
@@ -567,8 +520,8 @@ bool TurboAssembler::AllowThisStubCall(CodeStub* stub) {
   return has_frame() || !stub->SometimesSetsUpAFrame();
 }
 
-void TurboAssembler::CallRuntimeDelayed(Zone* zone, Runtime::FunctionId fid,
-                                        SaveFPRegsMode save_doubles) {
+void TurboAssembler::CallRuntimeWithCEntry(Runtime::FunctionId fid,
+                                           Register centry) {
   const Runtime::Function* f = Runtime::FunctionForId(fid);
   // TODO(1236192): Most runtime routines don't need the number of
   // arguments passed in because it is constant. At some point we
@@ -576,9 +529,9 @@ void TurboAssembler::CallRuntimeDelayed(Zone* zone, Runtime::FunctionId fid,
   // smarter.
   Set(rax, f->nargs);
   LoadAddress(rbx, ExternalReference::Create(f));
-  Handle<Code> code =
-      CodeFactory::CEntry(isolate(), f->result_size, save_doubles);
-  Call(code, RelocInfo::CODE_TARGET);
+  DCHECK(!AreAliased(centry, rax, rbx));
+  addp(rcx, Immediate(Code::kHeaderSize - kHeapObjectTag));
+  Call(centry);
 }
 
 void MacroAssembler::CallRuntime(const Runtime::Function* f,
@@ -1116,10 +1069,8 @@ void TurboAssembler::Move(Register dst, Smi* source) {
 
 void TurboAssembler::Move(Register dst, ExternalReference ext) {
 #ifdef V8_EMBEDDED_BUILTINS
-  if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList() &&
-      ext.address() !=
-          ExternalReference::roots_array_start(isolate()).address()) {
-    LookupExternalReference(dst, ext);
+  if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList()) {
+    IndirectLoadExternalReference(dst, ext);
     return;
   }
 #endif  // V8_EMBEDDED_BUILTINS
@@ -1429,7 +1380,7 @@ void TurboAssembler::Move(Register result, Handle<HeapObject> object,
                           RelocInfo::Mode rmode) {
 #ifdef V8_EMBEDDED_BUILTINS
   if (root_array_available_ && isolate()->ShouldLoadConstantsFromRootList()) {
-    LookupConstant(result, object);
+    IndirectLoadConstant(result, object);
     return;
   }
 #endif  // V8_EMBEDDED_BUILTINS
@@ -1583,7 +1534,7 @@ void TurboAssembler::Jump(Handle<Code> code_object, RelocInfo::Mode rmode,
       if (cc == never) return;
       j(NegateCondition(cc), &skip, Label::kNear);
     }
-    LookupConstant(kScratchRegister, code_object);
+    IndirectLoadConstant(kScratchRegister, code_object);
     leap(kScratchRegister, FieldOperand(kScratchRegister, Code::kHeaderSize));
     jmp(kScratchRegister);
     bind(&skip);
@@ -1652,7 +1603,7 @@ void TurboAssembler::Call(Handle<Code> code_object, RelocInfo::Mode rmode) {
     // are patched up to point directly to the off-heap instruction start.
     // Note: It is safe to dereference code_object above since code generation
     // for builtins and code stubs happens on the main thread.
-    LookupConstant(kScratchRegister, code_object);
+    IndirectLoadConstant(kScratchRegister, code_object);
     leap(kScratchRegister, FieldOperand(kScratchRegister, Code::kHeaderSize));
     call(kScratchRegister);
     return;

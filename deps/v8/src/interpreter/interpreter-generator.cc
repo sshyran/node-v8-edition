@@ -154,7 +154,7 @@ class InterpreterLoadGlobalAssembler : public InterpreterAssembler {
 
   void LdaGlobal(int slot_operand_index, int name_operand_index,
                  TypeofMode typeof_mode) {
-    TNode<FeedbackVector> feedback_vector = CAST(LoadFeedbackVector());
+    TNode<FeedbackVector> feedback_vector = LoadFeedbackVector();
     Node* feedback_slot = BytecodeOperandIdx(slot_operand_index);
 
     AccessorAssembler accessor_asm(state());
@@ -2646,7 +2646,7 @@ IGNITION_HANDLER(CreateRestParameter, InterpreterAssembler) {
 //
 // Performs a stack guard check.
 IGNITION_HANDLER(StackCheck, InterpreterAssembler) {
-  Node* context = GetContext();
+  TNode<Context> context = CAST(GetContext());
   PerformStackCheck(context);
   Dispatch();
 }
@@ -3132,7 +3132,7 @@ Handle<Code> GenerateBytecodeHandler(Isolate* isolate, Bytecode bytecode,
                        Bytecodes::ToString(bytecode, operand_scale).c_str()));
 #ifdef ENABLE_DISASSEMBLER
   if (FLAG_trace_ignition_codegen) {
-    OFStream os(stdout);
+    StdoutStream os;
     code->Disassemble(Bytecodes::ToString(bytecode), os);
     os << std::flush;
   }
@@ -3199,7 +3199,7 @@ Handle<Code> GenerateDeserializeLazyHandler(Isolate* isolate,
 
 #ifdef ENABLE_DISASSEMBLER
   if (FLAG_trace_ignition_codegen) {
-    OFStream os(stdout);
+    StdoutStream os;
     code->Disassemble(debug_name.c_str(), os);
     os << std::flush;
   }

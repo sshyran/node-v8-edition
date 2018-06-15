@@ -6,7 +6,6 @@
 
 #include <ostream>
 
-#include "src/builtins/constants-table-builder.h"
 #include "src/code-factory.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/instruction-selector.h"
@@ -22,23 +21,25 @@
 #include "src/machine-type.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
-#include "src/snapshot/serializer-common.h"
 #include "src/utils.h"
 #include "src/zone/zone.h"
 
-#define REPEAT_1_TO_2(V, T) V(T) V(T, T)
-#define REPEAT_1_TO_3(V, T) REPEAT_1_TO_2(V, T) V(T, T, T)
-#define REPEAT_1_TO_4(V, T) REPEAT_1_TO_3(V, T) V(T, T, T, T)
-#define REPEAT_1_TO_5(V, T) REPEAT_1_TO_4(V, T) V(T, T, T, T, T)
-#define REPEAT_1_TO_6(V, T) REPEAT_1_TO_5(V, T) V(T, T, T, T, T, T)
-#define REPEAT_1_TO_7(V, T) REPEAT_1_TO_6(V, T) V(T, T, T, T, T, T, T)
-#define REPEAT_1_TO_8(V, T) REPEAT_1_TO_7(V, T) V(T, T, T, T, T, T, T, T)
-#define REPEAT_1_TO_9(V, T) REPEAT_1_TO_8(V, T) V(T, T, T, T, T, T, T, T, T)
-#define REPEAT_1_TO_10(V, T) REPEAT_1_TO_9(V, T) V(T, T, T, T, T, T, T, T, T, T)
-#define REPEAT_1_TO_11(V, T) \
-  REPEAT_1_TO_10(V, T) V(T, T, T, T, T, T, T, T, T, T, T)
-#define REPEAT_1_TO_12(V, T) \
-  REPEAT_1_TO_11(V, T) V(T, T, T, T, T, T, T, T, T, T, T, T)
+#define REPEAT_0_TO_1(V, T0, T) V(T0) V(T0, T)
+#define REPEAT_0_TO_2(V, T0, T) REPEAT_0_TO_1(V, T0, T) V(T0, T, T)
+#define REPEAT_0_TO_3(V, T0, T) REPEAT_0_TO_2(V, T0, T) V(T0, T, T, T)
+#define REPEAT_0_TO_4(V, T0, T) REPEAT_0_TO_3(V, T0, T) V(T0, T, T, T, T)
+#define REPEAT_0_TO_5(V, T0, T) REPEAT_0_TO_4(V, T0, T) V(T0, T, T, T, T, T)
+#define REPEAT_0_TO_6(V, T0, T) REPEAT_0_TO_5(V, T0, T) V(T0, T, T, T, T, T, T)
+#define REPEAT_0_TO_7(V, T0, T) \
+  REPEAT_0_TO_6(V, T0, T) V(T0, T, T, T, T, T, T, T)
+#define REPEAT_0_TO_8(V, T0, T) \
+  REPEAT_0_TO_7(V, T0, T) V(T0, T, T, T, T, T, T, T, T)
+#define REPEAT_0_TO_9(V, T0, T) \
+  REPEAT_0_TO_8(V, T0, T) V(T0, T, T, T, T, T, T, T, T, T)
+#define REPEAT_0_TO_10(V, T0, T) \
+  REPEAT_0_TO_9(V, T0, T) V(T0, T, T, T, T, T, T, T, T, T, T)
+#define REPEAT_0_TO_11(V, T0, T) \
+  REPEAT_0_TO_10(V, T0, T) V(T0, T, T, T, T, T, T, T, T, T, T, T)
 
 namespace v8 {
 namespace internal {
@@ -259,34 +260,6 @@ void CodeAssembler::GenerateCheckMaybeObjectIsObject(Node* node,
 }
 #endif
 
-#ifdef V8_EMBEDDED_BUILTINS
-// External references are stored in the external reference table.
-TNode<ExternalReference> CodeAssembler::LookupExternalReference(
-    ExternalReference reference) {
-  DCHECK(isolate()->ShouldLoadConstantsFromRootList());
-
-  // Encode as an index into the external reference table stored on the isolate.
-
-  ExternalReferenceEncoder encoder(isolate());
-  ExternalReferenceEncoder::Value v = encoder.Encode(reference.address());
-  CHECK(!v.is_from_api());
-  uint32_t index = v.index();
-
-  // Generate code to load from the external reference table.
-
-  const intptr_t roots_to_external_reference_offset =
-      Heap::roots_to_external_reference_table_offset()
-#ifdef V8_TARGET_ARCH_X64
-      - kRootRegisterBias
-#endif
-      + ExternalReferenceTable::OffsetOfEntry(index);
-
-  return UncheckedCast<ExternalReference>(
-      Load(MachineType::Pointer(), LoadRootsPointer(),
-           IntPtrConstant(roots_to_external_reference_offset)));
-}
-#endif  // V8_EMBEDDED_BUILTINS
-
 TNode<Int32T> CodeAssembler::Int32Constant(int32_t value) {
   return UncheckedCast<Int32T>(raw_assembler()->Int32Constant(value));
 }
@@ -339,11 +312,6 @@ TNode<Oddball> CodeAssembler::BooleanConstant(bool value) {
 
 TNode<ExternalReference> CodeAssembler::ExternalConstant(
     ExternalReference address) {
-#ifdef V8_EMBEDDED_BUILTINS
-  if (isolate()->ShouldLoadConstantsFromRootList()) {
-    return LookupExternalReference(address);
-  }
-#endif  // V8_EMBEDDED_BUILTINS
   return UncheckedCast<ExternalReference>(
       raw_assembler()->ExternalConstant(address));
 }
@@ -504,6 +472,7 @@ Node* CodeAssembler::LoadParentFramePointer() {
   return raw_assembler()->LoadParentFramePointer();
 }
 
+// TODO(jgruber): This can be removed.
 TNode<IntPtrT> CodeAssembler::LoadRootsPointer() {
   return UncheckedCast<IntPtrT>(raw_assembler()->LoadRootsPointer());
 }
@@ -981,6 +950,9 @@ TNode<Object> CodeAssembler::LoadRoot(Heap::RootListIndex root_index) {
     }
   }
 
+  // TODO(jgruber): In theory we could generate better code for this by
+  // letting the macro assembler decide how to load from the roots list. In most
+  // cases, it would boil down to loading from a fixed kRootRegister offset.
   Node* roots_array_start =
       ExternalConstant(ExternalReference::roots_array_start(isolate()));
   return UncheckedCast<Object>(Load(MachineType::AnyTagged(), roots_array_start,
@@ -1082,7 +1054,7 @@ void CodeAssembler::GotoIfException(Node* node, Label* if_exception,
 
 template <class... TArgs>
 TNode<Object> CodeAssembler::CallRuntimeImpl(Runtime::FunctionId function,
-                                             SloppyTNode<Object> context,
+                                             TNode<Object> context,
                                              TArgs... args) {
   int argc = static_cast<int>(sizeof...(args));
   auto call_descriptor = Linkage::GetRuntimeCallDescriptor(
@@ -1095,7 +1067,8 @@ TNode<Object> CodeAssembler::CallRuntimeImpl(Runtime::FunctionId function,
   Node* ref = ExternalConstant(ExternalReference::Create(function));
   Node* arity = Int32Constant(argc);
 
-  Node* nodes[] = {centry, args..., ref, arity, context};
+  Node* nodes[] = {centry, implicit_cast<TNode<Object>>(args)..., ref, arity,
+                   context};
 
   CallPrologue();
   Node* return_value =
@@ -1108,41 +1081,58 @@ TNode<Object> CodeAssembler::CallRuntimeImpl(Runtime::FunctionId function,
 #define INSTANTIATE(...)                                                   \
   template V8_EXPORT_PRIVATE TNode<Object> CodeAssembler::CallRuntimeImpl( \
       Runtime::FunctionId, __VA_ARGS__);
-REPEAT_1_TO_7(INSTANTIATE, SloppyTNode<Object>)
+REPEAT_0_TO_6(INSTANTIATE, TNode<Object>, SloppyTNode<Object>)
 #undef INSTANTIATE
 
 template <class... TArgs>
-TNode<Object> CodeAssembler::TailCallRuntimeImpl(Runtime::FunctionId function,
-                                                 SloppyTNode<Object> context,
-                                                 TArgs... args) {
+void CodeAssembler::TailCallRuntimeImpl(Runtime::FunctionId function,
+                                        TNode<Int32T> arity,
+                                        TNode<Object> context, TArgs... args) {
+  int result_size = Runtime::FunctionForId(function)->result_size;
+  TNode<Code> centry =
+      HeapConstant(CodeFactory::RuntimeCEntry(isolate(), result_size));
+  return TailCallRuntimeWithCEntryImpl(function, arity, centry, context,
+                                       implicit_cast<TNode<Object>>(args)...);
+}
+
+// Instantiate TailCallRuntime() for argument counts used by CSA-generated code
+#define INSTANTIATE(...)                                              \
+  template V8_EXPORT_PRIVATE void CodeAssembler::TailCallRuntimeImpl( \
+      Runtime::FunctionId, TNode<Int32T>, __VA_ARGS__);
+REPEAT_0_TO_6(INSTANTIATE, TNode<Object>, SloppyTNode<Object>)
+#undef INSTANTIATE
+
+template <class... TArgs>
+void CodeAssembler::TailCallRuntimeWithCEntryImpl(Runtime::FunctionId function,
+                                                  TNode<Int32T> arity,
+                                                  TNode<Code> centry,
+                                                  TNode<Object> context,
+                                                  TArgs... args) {
   int argc = static_cast<int>(sizeof...(args));
   auto call_descriptor = Linkage::GetRuntimeCallDescriptor(
       zone(), function, argc, Operator::kNoProperties,
       CallDescriptor::kNoFlags);
-  int return_count = static_cast<int>(call_descriptor->ReturnCount());
 
-  Node* centry =
-      HeapConstant(CodeFactory::RuntimeCEntry(isolate(), return_count));
   Node* ref = ExternalConstant(ExternalReference::Create(function));
-  Node* arity = Int32Constant(argc);
 
   Node* nodes[] = {centry, args..., ref, arity, context};
 
-  return UncheckedCast<Object>(
-      raw_assembler()->TailCallN(call_descriptor, arraysize(nodes), nodes));
+  raw_assembler()->TailCallN(call_descriptor, arraysize(nodes), nodes);
 }
 
-// Instantiate TailCallRuntime() for argument counts used by CSA-generated code
-#define INSTANTIATE(...)                                                       \
-  template V8_EXPORT_PRIVATE TNode<Object> CodeAssembler::TailCallRuntimeImpl( \
-      Runtime::FunctionId, __VA_ARGS__);
-REPEAT_1_TO_7(INSTANTIATE, SloppyTNode<Object>)
+// Instantiate TailCallRuntimeWithCEntryImpl() for argument counts used by
+// CSA-generated code.
+#define INSTANTIATE(...)                            \
+  template V8_EXPORT_PRIVATE void                   \
+      CodeAssembler::TailCallRuntimeWithCEntryImpl( \
+          Runtime::FunctionId, TNode<Int32T>, TNode<Code>, __VA_ARGS__);
+REPEAT_0_TO_6(INSTANTIATE, TNode<Object>, SloppyTNode<Object>)
 #undef INSTANTIATE
 
 template <class... TArgs>
 Node* CodeAssembler::CallStubR(const CallInterfaceDescriptor& descriptor,
-                               size_t result_size, Node* target, Node* context,
-                               TArgs... args) {
+                               size_t result_size, SloppyTNode<Code> target,
+                               SloppyTNode<Object> context, TArgs... args) {
   Node* nodes[] = {target, args..., context};
   int input_count = arraysize(nodes);
   if (context == nullptr) --input_count;
@@ -1151,10 +1141,11 @@ Node* CodeAssembler::CallStubR(const CallInterfaceDescriptor& descriptor,
 }
 
 // Instantiate CallStubR() for argument counts used by CSA-generated code.
-#define INSTANTIATE(...)                                     \
-  template V8_EXPORT_PRIVATE Node* CodeAssembler::CallStubR( \
-      const CallInterfaceDescriptor& descriptor, size_t, Node*, __VA_ARGS__);
-REPEAT_1_TO_11(INSTANTIATE, Node*)
+#define INSTANTIATE(...)                                                    \
+  template V8_EXPORT_PRIVATE Node* CodeAssembler::CallStubR(                \
+      const CallInterfaceDescriptor& descriptor, size_t, SloppyTNode<Code>, \
+      __VA_ARGS__);
+REPEAT_0_TO_10(INSTANTIATE, SloppyTNode<Object>, Node*)
 #undef INSTANTIATE
 
 Node* CodeAssembler::CallStubN(const CallInterfaceDescriptor& descriptor,
@@ -1182,9 +1173,9 @@ Node* CodeAssembler::CallStubN(const CallInterfaceDescriptor& descriptor,
 }
 
 template <class... TArgs>
-Node* CodeAssembler::TailCallStubImpl(const CallInterfaceDescriptor& descriptor,
-                                      Node* target, Node* context,
-                                      TArgs... args) {
+void CodeAssembler::TailCallStubImpl(const CallInterfaceDescriptor& descriptor,
+                                     TNode<Code> target, TNode<Object> context,
+                                     TArgs... args) {
   DCHECK_EQ(descriptor.GetParameterCount(), sizeof...(args));
   size_t result_size = 1;
   auto call_descriptor = Linkage::GetStubCallDescriptor(
@@ -1194,14 +1185,14 @@ Node* CodeAssembler::TailCallStubImpl(const CallInterfaceDescriptor& descriptor,
 
   Node* nodes[] = {target, args..., context};
   CHECK_EQ(descriptor.GetParameterCount() + 2, arraysize(nodes));
-  return raw_assembler()->TailCallN(call_descriptor, arraysize(nodes), nodes);
+  raw_assembler()->TailCallN(call_descriptor, arraysize(nodes), nodes);
 }
 
 // Instantiate TailCallStub() for argument counts used by CSA-generated code
-#define INSTANTIATE(...)                                            \
-  template V8_EXPORT_PRIVATE Node* CodeAssembler::TailCallStubImpl( \
-      const CallInterfaceDescriptor& descriptor, Node*, __VA_ARGS__);
-REPEAT_1_TO_12(INSTANTIATE, Node*)
+#define INSTANTIATE(...)                                           \
+  template V8_EXPORT_PRIVATE void CodeAssembler::TailCallStubImpl( \
+      const CallInterfaceDescriptor& descriptor, TNode<Code>, __VA_ARGS__);
+REPEAT_0_TO_11(INSTANTIATE, TNode<Object>, Node*)
 #undef INSTANTIATE
 
 template <class... TArgs>
@@ -1222,13 +1213,13 @@ Node* CodeAssembler::TailCallStubThenBytecodeDispatch(
   return raw_assembler()->TailCallN(call_descriptor, arraysize(nodes), nodes);
 }
 
-// Instantiate TailCallJSAndBytecodeDispatch() for argument counts used by
+// Instantiate TailCallStubThenBytecodeDispatch() for argument counts used by
 // CSA-generated code
 #define INSTANTIATE(...)                           \
   template V8_EXPORT_PRIVATE Node*                 \
   CodeAssembler::TailCallStubThenBytecodeDispatch( \
       const CallInterfaceDescriptor&, Node*, Node*, Node*, __VA_ARGS__);
-REPEAT_1_TO_7(INSTANTIATE, Node*)
+REPEAT_0_TO_6(INSTANTIATE, Node*, Node*)
 #undef INSTANTIATE
 
 template <class... TArgs>
@@ -1248,6 +1239,26 @@ Node* CodeAssembler::TailCallBytecodeDispatch(
 template V8_EXPORT_PRIVATE Node* CodeAssembler::TailCallBytecodeDispatch(
     const CallInterfaceDescriptor& descriptor, Node* target, Node*, Node*,
     Node*, Node*);
+
+TNode<Object> CodeAssembler::TailCallJSCode(TNode<Code> code,
+                                            TNode<Context> context,
+                                            TNode<JSFunction> function,
+                                            TNode<Object> new_target,
+                                            TNode<Int32T> arg_count) {
+  // Use the ConstructTrampolineDescriptor because it passes new.target too in
+  // case this is called during construct.
+  ConstructTrampolineDescriptor descriptor(isolate());
+  size_t result_size = 1;
+  auto call_descriptor = Linkage::GetStubCallDescriptor(
+      isolate(), zone(), descriptor, descriptor.GetStackParameterCount(),
+      CallDescriptor::kFixedTargetRegister, Operator::kNoProperties,
+      MachineType::AnyTagged(), result_size);
+
+  Node* nodes[] = {code, function, new_target, arg_count, context};
+  CHECK_EQ(descriptor.GetParameterCount() + 2, arraysize(nodes));
+  return UncheckedCast<Object>(
+      raw_assembler()->TailCallN(call_descriptor, arraysize(nodes), nodes));
+}
 
 Node* CodeAssembler::CallCFunctionN(Signature<MachineType>* signature,
                                     int input_count, Node* const* inputs) {
@@ -1702,14 +1713,14 @@ Smi* CheckObjectType(Object* value, Smi* type, String* location) {
 }  // namespace internal
 }  // namespace v8
 
-#undef REPEAT_1_TO_2
-#undef REPEAT_1_TO_3
-#undef REPEAT_1_TO_4
-#undef REPEAT_1_TO_5
-#undef REPEAT_1_TO_6
-#undef REPEAT_1_TO_7
-#undef REPEAT_1_TO_8
-#undef REPEAT_1_TO_9
-#undef REPEAT_1_TO_10
-#undef REPEAT_1_TO_11
-#undef REPEAT_1_TO_12
+#undef REPEAT_0_TO_1
+#undef REPEAT_0_TO_2
+#undef REPEAT_0_TO_3
+#undef REPEAT_0_TO_4
+#undef REPEAT_0_TO_5
+#undef REPEAT_0_TO_6
+#undef REPEAT_0_TO_7
+#undef REPEAT_0_TO_8
+#undef REPEAT_0_TO_9
+#undef REPEAT_0_TO_10
+#undef REPEAT_0_TO_11
