@@ -78,7 +78,7 @@ class IndirectFunctionTableEntry {
 //      - target   = pointer to wasm-to-js wrapper code entrypoint
 //   - an imported wasm function from another instance, which has fields
 //      - instance = target instance
-//      - target   = entrypoint to wasm code of the function
+//      - target   = entrypoint for the function
 class ImportedFunctionEntry {
  public:
   inline ImportedFunctionEntry(Handle<WasmInstanceObject>, int index);
@@ -108,8 +108,8 @@ class WasmModuleObject : public JSObject {
   // Shared compiled code between multiple WebAssembly.Module objects.
   DECL_ACCESSORS(compiled_module, WasmCompiledModule)
   DECL_ACCESSORS(export_wrappers, FixedArray)
-  DECL_ACCESSORS(managed_module, Object)
-  wasm::WasmModule* module() const;
+  DECL_ACCESSORS(managed_module, Managed<wasm::WasmModule>)
+  inline wasm::WasmModule* module() const;
   DECL_ACCESSORS(module_bytes, SeqOneByteString)
   DECL_ACCESSORS(script, Script)
   DECL_OPTIONAL_ACCESSORS(asm_js_offset_table, ByteArray)
@@ -135,11 +135,13 @@ class WasmModuleObject : public JSObject {
                                 WASM_MODULE_OBJECT_FIELDS)
 #undef WASM_MODULE_OBJECT_FIELDS
 
-  static Handle<WasmModuleObject> New(
-      Isolate* isolate, Handle<WasmCompiledModule> compiled_module,
-      Handle<FixedArray> export_wrappers, Handle<Foreign> managed_module,
-      Handle<SeqOneByteString> module_bytes, Handle<Script> script,
-      Handle<ByteArray> asm_js_offset_table);
+  static Handle<WasmModuleObject> New(Isolate* isolate,
+                                      Handle<FixedArray> export_wrappers,
+                                      std::shared_ptr<wasm::WasmModule> module,
+                                      wasm::ModuleEnv& env,
+                                      Handle<SeqOneByteString> module_bytes,
+                                      Handle<Script> script,
+                                      Handle<ByteArray> asm_js_offset_table);
 
   // Set a breakpoint on the given byte position inside the given module.
   // This will affect all live and future instances of the module.
@@ -387,7 +389,6 @@ class WasmInstanceObject : public JSObject {
   DECL_ACCESSORS(imported_function_callables, FixedArray)
   DECL_OPTIONAL_ACCESSORS(indirect_function_table_instances, FixedArray)
   DECL_OPTIONAL_ACCESSORS(managed_native_allocations, Foreign)
-  DECL_OPTIONAL_ACCESSORS(managed_indirect_patcher, Foreign)
   DECL_ACCESSORS(undefined_value, Oddball)
   DECL_ACCESSORS(null_value, Oddball)
   DECL_ACCESSORS(centry_stub, Code)
@@ -422,7 +423,6 @@ class WasmInstanceObject : public JSObject {
   V(kImportedFunctionCallablesOffset, kPointerSize)                     \
   V(kIndirectFunctionTableInstancesOffset, kPointerSize)                \
   V(kManagedNativeAllocationsOffset, kPointerSize)                      \
-  V(kManagedIndirectPatcherOffset, kPointerSize)                        \
   V(kUndefinedValueOffset, kPointerSize)                                \
   V(kNullValueOffset, kPointerSize)                                     \
   V(kCEntryStubOffset, kPointerSize)                                    \
@@ -591,8 +591,6 @@ class WasmCompiledModule : public Struct {
   DECL_ACCESSORS(raw_prev_instance, Object);
 
   void PrintInstancesChain();
-
-  void LogWasmCodes(Isolate* isolate);
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(WasmCompiledModule);

@@ -352,14 +352,33 @@ void CodeGenerator::TryInsertBranchPoisoning(const InstructionBlock* block) {
   }
 }
 
+void CodeGenerator::AssembleArchBinarySearchSwitchRange(
+    Register input, RpoNumber def_block, std::pair<int32_t, Label*>* begin,
+    std::pair<int32_t, Label*>* end) {
+  if (end - begin < kBinarySearchSwitchMinimalCases) {
+    while (begin != end) {
+      tasm()->JumpIfEqual(input, begin->first, begin->second);
+      ++begin;
+    }
+    AssembleArchJump(def_block);
+    return;
+  }
+  auto middle = begin + (end - begin) / 2;
+  Label less_label;
+  tasm()->JumpIfLessThan(input, middle->first, &less_label);
+  AssembleArchBinarySearchSwitchRange(input, def_block, middle, end);
+  tasm()->bind(&less_label);
+  AssembleArchBinarySearchSwitchRange(input, def_block, begin, middle);
+}
+
 Handle<ByteArray> CodeGenerator::GetSourcePositionTable() {
   return source_position_table_builder_.ToSourcePositionTable(isolate());
 }
 
-Handle<Code> CodeGenerator::FinalizeCode() {
+MaybeHandle<Code> CodeGenerator::FinalizeCode() {
   if (result_ != kSuccess) {
     tasm()->AbortedCodeGeneration();
-    return Handle<Code>();
+    return MaybeHandle<Code>();
   }
 
   // Allocate the source position table.
@@ -381,10 +400,11 @@ Handle<Code> CodeGenerator::FinalizeCode() {
       source_positions, deopt_data, kMovable, info()->stub_key(), true,
       frame()->GetTotalFrameSlotCount(), safepoints()->GetCodeOffset(),
       handler_table_offset_);
+
   Handle<Code> code;
   if (!maybe_code.ToHandle(&code)) {
     tasm()->AbortedCodeGeneration();
-    return Handle<Code>();
+    return MaybeHandle<Code>();
   }
   isolate()->counters()->total_compiled_code_size()->Increment(
       code->raw_instruction_size());

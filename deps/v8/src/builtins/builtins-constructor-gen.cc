@@ -36,28 +36,20 @@ void Builtins::Generate_ConstructFunctionForwardVarargs(MacroAssembler* masm) {
 }
 
 TF_BUILTIN(ConstructWithArrayLike, CallOrConstructBuiltinsAssembler) {
-  TNode<Object> target =
-      CAST(Parameter(ConstructWithArrayLikeDescriptor::kTarget));
-  SloppyTNode<Object> new_target =
-      CAST(Parameter(ConstructWithArrayLikeDescriptor::kNewTarget));
-  TNode<Object> arguments_list =
-      CAST(Parameter(ConstructWithArrayLikeDescriptor::kArgumentsList));
-  TNode<Context> context =
-      CAST(Parameter(ConstructWithArrayLikeDescriptor::kContext));
+  TNode<Object> target = CAST(Parameter(Descriptor::kTarget));
+  SloppyTNode<Object> new_target = CAST(Parameter(Descriptor::kNewTarget));
+  TNode<Object> arguments_list = CAST(Parameter(Descriptor::kArgumentsList));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
   CallOrConstructWithArrayLike(target, new_target, arguments_list, context);
 }
 
 TF_BUILTIN(ConstructWithSpread, CallOrConstructBuiltinsAssembler) {
-  TNode<Object> target =
-      CAST(Parameter(ConstructWithSpreadDescriptor::kTarget));
-  SloppyTNode<Object> new_target =
-      CAST(Parameter(ConstructWithSpreadDescriptor::kNewTarget));
-  TNode<Object> spread =
-      CAST(Parameter(ConstructWithSpreadDescriptor::kSpread));
-  TNode<Int32T> args_count = UncheckedCast<Int32T>(
-      Parameter(ConstructWithSpreadDescriptor::kArgumentsCount));
-  TNode<Context> context =
-      CAST(Parameter(ConstructWithSpreadDescriptor::kContext));
+  TNode<Object> target = CAST(Parameter(Descriptor::kTarget));
+  SloppyTNode<Object> new_target = CAST(Parameter(Descriptor::kNewTarget));
+  TNode<Object> spread = CAST(Parameter(Descriptor::kSpread));
+  TNode<Int32T> args_count =
+      UncheckedCast<Int32T>(Parameter(Descriptor::kArgumentsCount));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
   CallOrConstructWithSpread(target, new_target, spread, args_count, context);
 }
 
@@ -285,17 +277,17 @@ Node* ConstructorBuiltinsAssembler::EmitFastNewFunctionContext(
 }
 
 TF_BUILTIN(FastNewFunctionContextEval, ConstructorBuiltinsAssembler) {
-  Node* scope_info = Parameter(FastNewFunctionContextDescriptor::kScopeInfo);
-  Node* slots = Parameter(FastNewFunctionContextDescriptor::kSlots);
-  Node* context = Parameter(FastNewFunctionContextDescriptor::kContext);
+  Node* scope_info = Parameter(Descriptor::kScopeInfo);
+  Node* slots = Parameter(Descriptor::kSlots);
+  Node* context = Parameter(Descriptor::kContext);
   Return(EmitFastNewFunctionContext(scope_info, slots, context,
                                     ScopeType::EVAL_SCOPE));
 }
 
 TF_BUILTIN(FastNewFunctionContextFunction, ConstructorBuiltinsAssembler) {
-  Node* scope_info = Parameter(FastNewFunctionContextDescriptor::kScopeInfo);
-  Node* slots = Parameter(FastNewFunctionContextDescriptor::kSlots);
-  Node* context = Parameter(FastNewFunctionContextDescriptor::kContext);
+  Node* scope_info = Parameter(Descriptor::kScopeInfo);
+  Node* slots = Parameter(Descriptor::kSlots);
+  Node* context = Parameter(Descriptor::kContext);
   Return(EmitFastNewFunctionContext(scope_info, slots, context,
                                     ScopeType::FUNCTION_SCOPE));
 }
@@ -639,10 +631,10 @@ Node* ConstructorBuiltinsAssembler::EmitCreateEmptyObjectLiteral(
 TF_BUILTIN(ObjectConstructor, ConstructorBuiltinsAssembler) {
   int const kValueArg = 0;
   Node* argc =
-      ChangeInt32ToIntPtr(Parameter(BuiltinDescriptor::kArgumentsCount));
+      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
   CodeStubArguments args(this, argc);
-  Node* context = Parameter(BuiltinDescriptor::kContext);
-  Node* new_target = Parameter(BuiltinDescriptor::kNewTarget);
+  Node* context = Parameter(Descriptor::kContext);
+  Node* new_target = Parameter(Descriptor::kJSNewTarget);
 
   VARIABLE(var_result, MachineRepresentation::kTagged);
   Label if_subclass(this, Label::kDeferred), if_notsubclass(this),
@@ -691,9 +683,9 @@ TF_BUILTIN(ObjectConstructor, ConstructorBuiltinsAssembler) {
 
 // ES #sec-number-constructor
 TF_BUILTIN(NumberConstructor, ConstructorBuiltinsAssembler) {
-  Node* context = Parameter(BuiltinDescriptor::kContext);
+  Node* context = Parameter(Descriptor::kContext);
   Node* argc =
-      ChangeInt32ToIntPtr(Parameter(BuiltinDescriptor::kArgumentsCount));
+      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
   CodeStubArguments args(this, argc);
 
   // 1. If no arguments were passed to this function invocation, let n be +0.
@@ -713,7 +705,7 @@ TF_BUILTIN(NumberConstructor, ConstructorBuiltinsAssembler) {
   {
     // 3. If NewTarget is undefined, return n.
     Node* n_value = var_n.value();
-    Node* new_target = Parameter(BuiltinDescriptor::kNewTarget);
+    Node* new_target = Parameter(Descriptor::kJSNewTarget);
     Label return_n(this), constructnumber(this, Label::kDeferred);
     Branch(IsUndefined(new_target), &return_n, &constructnumber);
 
@@ -738,12 +730,12 @@ TF_BUILTIN(NumberConstructor, ConstructorBuiltinsAssembler) {
 
 // https://tc39.github.io/ecma262/#sec-string-constructor
 TF_BUILTIN(StringConstructor, ConstructorBuiltinsAssembler) {
-  Node* context = Parameter(BuiltinDescriptor::kContext);
+  Node* context = Parameter(Descriptor::kContext);
   Node* argc =
-      ChangeInt32ToIntPtr(Parameter(BuiltinDescriptor::kArgumentsCount));
+      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
   CodeStubArguments args(this, argc);
 
-  Node* new_target = Parameter(BuiltinDescriptor::kNewTarget);
+  Node* new_target = Parameter(Descriptor::kJSNewTarget);
   Node* target = LoadFromFrame(StandardFrameConstants::kFunctionOffset,
                                MachineType::TaggedPointer());
 

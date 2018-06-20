@@ -26,9 +26,13 @@ constexpr Register kInterpreterAccumulatorRegister = r2;
 constexpr Register kInterpreterBytecodeOffsetRegister = r6;
 constexpr Register kInterpreterBytecodeArrayRegister = r7;
 constexpr Register kInterpreterDispatchTableRegister = r8;
+
 constexpr Register kJavaScriptCallArgCountRegister = r2;
-constexpr Register kJavaScriptCallNewTargetRegister = r5;
 constexpr Register kJavaScriptCallCodeStartRegister = r4;
+constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
+constexpr Register kJavaScriptCallNewTargetRegister = r5;
+constexpr Register kJavaScriptCallExtraArg1Register = r4;
+
 constexpr Register kOffHeapTrampolineRegister = ip;
 constexpr Register kRuntimeCallFunctionRegister = r3;
 constexpr Register kRuntimeCallArgCountRegister = r2;
@@ -198,6 +202,9 @@ class TurboAssembler : public TurboAssemblerBase {
     TestIfSmi(value);
     beq(smi_label /*, cr0*/);  // branch if SMI
   }
+  void JumpIfEqual(Register x, int32_t y, Label* dest);
+  void JumpIfLessThan(Register x, int32_t y, Label* dest);
+
   void Call(Register target);
   void Call(Address target, RelocInfo::Mode rmode, Condition cond = al);
   int CallSize(Handle<Code> code,
@@ -243,6 +250,8 @@ class TurboAssembler : public TurboAssemblerBase {
   void RotateInsertSelectBits(Register dst, Register src,
                      const Operand& startBit, const Operand& endBit,
                      const Operand& shiftAmt, bool zeroBits);
+
+  void BranchRelativeOnIdxHighP(Register dst, Register inc, Label* L);
 
   void SaveRegisters(RegList registers);
   void RestoreRegisters(RegList registers);

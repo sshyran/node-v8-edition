@@ -1739,10 +1739,6 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {  // NOLINT
     os << "\n - managed_native_allocations: "
        << Brief(managed_native_allocations());
   }
-  if (has_managed_indirect_patcher()) {
-    os << "\n - managed_indirect_patcher: "
-       << Brief(managed_indirect_patcher());
-  }
   os << "\n - memory_start: " << static_cast<void*>(memory_start());
   os << "\n - memory_size: " << memory_size();
   os << "\n - memory_mask: " << AsHex(memory_mask());
@@ -1993,7 +1989,6 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {  // NOLINT
   int flags = Flags();
 
   os << "\n - parameters: " << ParameterCount();
-  os << "\n - stack locals: " << StackLocalCount();
   os << "\n - context locals : " << ContextLocalCount();
 
   os << "\n - scope type: " << scope_type();
@@ -2028,10 +2023,6 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {  // NOLINT
   }
   os << "\n - length: " << length();
   if (length() > 0) {
-    PrintScopeInfoList(this, os, "parameters", 0, ParameterNamesIndex(),
-                       ParameterCount());
-    PrintScopeInfoList(this, os, "stack slots", 0, StackLocalNamesIndex(),
-                       StackLocalCount());
     PrintScopeInfoList(this, os, "context slots", Context::MIN_CONTEXT_SLOTS,
                        ContextLocalNamesIndex(), ContextLocalCount());
     // TODO(neis): Print module stuff if present.

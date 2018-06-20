@@ -4007,22 +4007,27 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
  public:
   WasmWrapperGraphBuilder(Zone* zone, wasm::ModuleEnv* env, JSGraph* jsgraph,
                           wasm::FunctionSig* sig,
-                          compiler::SourcePositionTable* spt)
+                          compiler::SourcePositionTable* spt,
+                          StubCallMode stub_mode)
       : WasmGraphBuilder(env, zone, jsgraph, sig, spt),
         isolate_(jsgraph->isolate()),
-        jsgraph_(jsgraph) {}
+        jsgraph_(jsgraph),
+        stub_mode_(stub_mode) {}
 
   Node* BuildAllocateHeapNumberWithValue(Node* value, Node* control) {
     MachineOperatorBuilder* machine = mcgraph()->machine();
     CommonOperatorBuilder* common = mcgraph()->common();
-    Callable callable =
-        Builtins::CallableFor(isolate_, Builtins::kAllocateHeapNumber);
-    Node* target = jsgraph()->HeapConstant(callable.code());
+    Node* target = (stub_mode_ == StubCallMode::kCallWasmRuntimeStub)
+                       ? mcgraph()->RelocatableIntPtrConstant(
+                             wasm::WasmCode::kWasmAllocateHeapNumber,
+                             RelocInfo::WASM_STUB_CALL)
+                       : jsgraph()->HeapConstant(
+                             BUILTIN_CODE(isolate_, AllocateHeapNumber));
     if (!allocate_heap_number_operator_.is_set()) {
       auto call_descriptor = Linkage::GetStubCallDescriptor(
-          isolate_, mcgraph()->zone(), callable.descriptor(), 0,
+          mcgraph()->zone(), AllocateHeapNumberDescriptor(), 0,
           CallDescriptor::kNoFlags, Operator::kNoThrow,
-          MachineType::AnyTagged(), 1, Linkage::kNoContext);
+          MachineType::AnyTagged(), 1, Linkage::kNoContext, stub_mode_);
       allocate_heap_number_operator_.set(common->Call(call_descriptor));
     }
     Node* heap_number = graph()->NewNode(allocate_heap_number_operator_.get(),
@@ -4181,11 +4186,15 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
   }
 
   Node* BuildJavaScriptToNumber(Node* node, Node* js_context) {
-    Callable callable = Builtins::CallableFor(isolate_, Builtins::kToNumber);
     auto call_descriptor = Linkage::GetStubCallDescriptor(
-        isolate_, mcgraph()->zone(), callable.descriptor(), 0,
-        CallDescriptor::kNoFlags, Operator::kNoProperties);
-    Node* stub_code = jsgraph()->HeapConstant(callable.code());
+        mcgraph()->zone(), TypeConversionDescriptor(), 0,
+        CallDescriptor::kNoFlags, Operator::kNoProperties,
+        MachineType::AnyTagged(), 1, Linkage::kPassContext, stub_mode_);
+    Node* stub_code =
+        (stub_mode_ == StubCallMode::kCallWasmRuntimeStub)
+            ? mcgraph()->RelocatableIntPtrConstant(
+                  wasm::WasmCode::kWasmToNumber, RelocInfo::WASM_STUB_CALL)
+            : jsgraph()->HeapConstant(BUILTIN_CODE(isolate_, ToNumber));
 
     Node* result =
         graph()->NewNode(mcgraph()->common()->Call(call_descriptor), stub_code,
@@ -4498,8 +4507,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
           }
 
           call_descriptor = Linkage::GetStubCallDescriptor(
-              isolate_, mcgraph()->zone(), ArgumentAdaptorDescriptor(isolate_),
-              1 + wasm_count, CallDescriptor::kNoFlags, Operator::kNoProperties,
+              mcgraph()->zone(), ArgumentAdaptorDescriptor{}, 1 + wasm_count,
+              CallDescriptor::kNoFlags, Operator::kNoProperties,
               MachineType::AnyTagged(), 1, Linkage::kPassContext,
               StubCallMode::kCallWasmRuntimeStub);
 
@@ -4524,8 +4533,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
       args[pos++] = undefined_node;                        // receiver
 
       call_descriptor = Linkage::GetStubCallDescriptor(
-          isolate_, graph()->zone(), CallTrampolineDescriptor(isolate_),
-          wasm_count + 1, CallDescriptor::kNoFlags, Operator::kNoProperties,
+          graph()->zone(), CallTrampolineDescriptor{}, wasm_count + 1,
+          CallDescriptor::kNoFlags, Operator::kNoProperties,
           MachineType::AnyTagged(), 1, Linkage::kPassContext,
           StubCallMode::kCallWasmRuntimeStub);
 
@@ -4708,13 +4717,14 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
  private:
   Isolate* const isolate_;
   JSGraph* jsgraph_;
+  StubCallMode stub_mode_;
   SetOncePointer<const Operator> allocate_heap_number_operator_;
 };
 }  // namespace
 
-Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
-                                    Address call_target, uint32_t index,
-                                    wasm::UseTrapHandler use_trap_handler) {
+MaybeHandle<Code> CompileJSToWasmWrapper(
+    Isolate* isolate, wasm::WasmModule* module, Address call_target,
+    uint32_t index, wasm::UseTrapHandler use_trap_handler) {
   const wasm::WasmFunction* func = &module->functions[index];
 
   //----------------------------------------------------------------------------
@@ -4733,7 +4743,8 @@ Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
   Node* effect = nullptr;
 
   wasm::ModuleEnv env(module, use_trap_handler, wasm::kRuntimeExceptionSupport);
-  WasmWrapperGraphBuilder builder(&zone, &env, &jsgraph, func->sig, nullptr);
+  WasmWrapperGraphBuilder builder(&zone, &env, &jsgraph, func->sig, nullptr,
+                                  StubCallMode::kCallOnHeapBuiltin);
   builder.set_control_ptr(&control);
   builder.set_effect_ptr(&effect);
   builder.BuildJSToWasmWrapper(index, call_target);
@@ -4762,10 +4773,14 @@ Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
   CallDescriptor* incoming = Linkage::GetJSCallDescriptor(
       &zone, false, params + 1, CallDescriptor::kNoFlags);
 
-  Handle<Code> code =
+  MaybeHandle<Code> maybe_code =
       Pipeline::GenerateCodeForTesting(&info, isolate, incoming, &graph);
+  Handle<Code> code;
+  if (!maybe_code.ToHandle(&code)) {
+    return maybe_code;
+  }
 #ifdef ENABLE_DISASSEMBLER
-  if (FLAG_print_opt_code && !code.is_null()) {
+  if (FLAG_print_opt_code) {
     CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
     OFStream os(tracing_scope.file());
     code->Disassemble(func_name.start(), os);
@@ -4780,10 +4795,10 @@ Handle<Code> CompileJSToWasmWrapper(Isolate* isolate, wasm::WasmModule* module,
   return code;
 }
 
-Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
-                                    wasm::FunctionSig* sig, uint32_t index,
-                                    wasm::ModuleOrigin origin,
-                                    wasm::UseTrapHandler use_trap_handler) {
+MaybeHandle<Code> CompileWasmToJSWrapper(
+    Isolate* isolate, Handle<JSReceiver> target, wasm::FunctionSig* sig,
+    uint32_t index, wasm::ModuleOrigin origin,
+    wasm::UseTrapHandler use_trap_handler) {
   //----------------------------------------------------------------------------
   // Create the Graph
   //----------------------------------------------------------------------------
@@ -4807,7 +4822,8 @@ Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
                       wasm::kRuntimeExceptionSupport);
 
   WasmWrapperGraphBuilder builder(&zone, &env, &jsgraph, sig,
-                                  source_position_table);
+                                  source_position_table,
+                                  StubCallMode::kCallWasmRuntimeStub);
   builder.set_control_ptr(&control);
   builder.set_effect_ptr(&effect);
   builder.BuildWasmToJSWrapper(target, index);
@@ -4833,10 +4849,14 @@ Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
     incoming = GetI32WasmCallDescriptor(&zone, incoming);
   }
 
-  Handle<Code> code = Pipeline::GenerateCodeForTesting(
+  MaybeHandle<Code> maybe_code = Pipeline::GenerateCodeForTesting(
       &info, isolate, incoming, &graph, nullptr, source_position_table);
+  Handle<Code> code;
+  if (!maybe_code.ToHandle(&code)) {
+    return maybe_code;
+  }
 #ifdef ENABLE_DISASSEMBLER
-  if (FLAG_print_opt_code && !code.is_null()) {
+  if (FLAG_print_opt_code) {
     CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
     OFStream os(tracing_scope.file());
     code->Disassemble(func_name.start(), os);
@@ -4851,8 +4871,9 @@ Handle<Code> CompileWasmToJSWrapper(Isolate* isolate, Handle<JSReceiver> target,
   return code;
 }
 
-Handle<Code> CompileWasmInterpreterEntry(Isolate* isolate, uint32_t func_index,
-                                         wasm::FunctionSig* sig) {
+MaybeHandle<Code> CompileWasmInterpreterEntry(Isolate* isolate,
+                                              uint32_t func_index,
+                                              wasm::FunctionSig* sig) {
   //----------------------------------------------------------------------------
   // Create the Graph
   //----------------------------------------------------------------------------
@@ -4868,54 +4889,55 @@ Handle<Code> CompileWasmInterpreterEntry(Isolate* isolate, uint32_t func_index,
   Node* control = nullptr;
   Node* effect = nullptr;
 
-  WasmWrapperGraphBuilder builder(&zone, nullptr, &jsgraph, sig, nullptr);
+  WasmWrapperGraphBuilder builder(&zone, nullptr, &jsgraph, sig, nullptr,
+                                  StubCallMode::kCallWasmRuntimeStub);
   builder.set_control_ptr(&control);
   builder.set_effect_ptr(&effect);
   builder.BuildWasmInterpreterEntry(func_index);
 
-  Handle<Code> code = Handle<Code>::null();
-  {
-    // Schedule and compile to machine code.
-    CallDescriptor* incoming = GetWasmCallDescriptor(&zone, sig);
-    if (machine.Is32()) {
-      incoming = GetI32WasmCallDescriptor(&zone, incoming);
-    }
+  // Schedule and compile to machine code.
+  CallDescriptor* incoming = GetWasmCallDescriptor(&zone, sig);
+  if (machine.Is32()) {
+    incoming = GetI32WasmCallDescriptor(&zone, incoming);
+  }
 #ifdef DEBUG
-    EmbeddedVector<char, 32> func_name;
-    func_name.Truncate(
-        SNPrintF(func_name, "wasm-interpreter-entry#%d", func_index));
+  EmbeddedVector<char, 32> func_name;
+  func_name.Truncate(
+      SNPrintF(func_name, "wasm-interpreter-entry#%d", func_index));
 #else
-    Vector<const char> func_name = CStrVector("wasm-interpreter-entry");
+  Vector<const char> func_name = CStrVector("wasm-interpreter-entry");
 #endif
 
-    OptimizedCompilationInfo info(func_name, &zone,
-                                  Code::WASM_INTERPRETER_ENTRY);
+  OptimizedCompilationInfo info(func_name, &zone, Code::WASM_INTERPRETER_ENTRY);
 
-    if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
-      StdoutStream{} << "-- Wasm interpreter entry graph -- " << std::endl
-                     << AsRPO(graph);
-    }
-
-    code = Pipeline::GenerateCodeForTesting(&info, isolate, incoming, &graph,
-                                            nullptr);
-#ifdef ENABLE_DISASSEMBLER
-    if (FLAG_print_opt_code && !code.is_null()) {
-      CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
-      OFStream os(tracing_scope.file());
-      code->Disassemble(func_name.start(), os);
-    }
-#endif
-
-    if (must_record_function_compilation(isolate)) {
-      RecordFunctionCompilation(CodeEventListener::STUB_TAG, isolate, code,
-                                "%.*s", func_name.length(), func_name.start());
-    }
+  if (info.trace_turbo_graph_enabled()) {  // Simple textual RPO.
+    StdoutStream{} << "-- Wasm interpreter entry graph -- " << std::endl
+                   << AsRPO(graph);
   }
 
-  return code;
+  MaybeHandle<Code> maybe_code = Pipeline::GenerateCodeForTesting(
+      &info, isolate, incoming, &graph, nullptr);
+  Handle<Code> code;
+  if (!maybe_code.ToHandle(&code)) {
+    return maybe_code;
+  }
+#ifdef ENABLE_DISASSEMBLER
+  if (FLAG_print_opt_code) {
+    CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
+    OFStream os(tracing_scope.file());
+    code->Disassemble(func_name.start(), os);
+  }
+#endif
+
+  if (must_record_function_compilation(isolate)) {
+    RecordFunctionCompilation(CodeEventListener::STUB_TAG, isolate, code,
+                              "%.*s", func_name.length(), func_name.start());
+  }
+
+  return maybe_code;
 }
 
-Handle<Code> CompileCWasmEntry(Isolate* isolate, wasm::FunctionSig* sig) {
+MaybeHandle<Code> CompileCWasmEntry(Isolate* isolate, wasm::FunctionSig* sig) {
   Zone zone(isolate->allocator(), ZONE_NAME);
   Graph graph(&zone);
   CommonOperatorBuilder common(&zone);
@@ -4928,7 +4950,8 @@ Handle<Code> CompileCWasmEntry(Isolate* isolate, wasm::FunctionSig* sig) {
   Node* control = nullptr;
   Node* effect = nullptr;
 
-  WasmWrapperGraphBuilder builder(&zone, nullptr, &jsgraph, sig, nullptr);
+  WasmWrapperGraphBuilder builder(&zone, nullptr, &jsgraph, sig, nullptr,
+                                  StubCallMode::kCallOnHeapBuiltin);
   builder.set_control_ptr(&control);
   builder.set_effect_ptr(&effect);
   builder.BuildCWasmEntry();
@@ -4961,10 +4984,14 @@ Handle<Code> CompileCWasmEntry(Isolate* isolate, wasm::FunctionSig* sig) {
     StdoutStream{} << "-- C Wasm entry graph -- " << std::endl << AsRPO(graph);
   }
 
-  Handle<Code> code =
+  MaybeHandle<Code> maybe_code =
       Pipeline::GenerateCodeForTesting(&info, isolate, incoming, &graph);
+  Handle<Code> code;
+  if (!maybe_code.ToHandle(&code)) {
+    return maybe_code;
+  }
 #ifdef ENABLE_DISASSEMBLER
-  if (FLAG_print_opt_code && !code.is_null()) {
+  if (FLAG_print_opt_code) {
     CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
     OFStream os(tracing_scope.file());
     code->Disassemble(debug_name, os);

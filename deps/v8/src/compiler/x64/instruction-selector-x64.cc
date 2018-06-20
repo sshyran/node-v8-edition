@@ -178,17 +178,6 @@ class X64OperandGenerator final : public OperandGenerator {
         }
       }
     }
-    if (operand->InputCount() == 2) {
-      Node* left = operand->InputAt(0);
-      Node* right = operand->InputAt(1);
-      if (left->opcode() == IrOpcode::kLoadRootsPointer &&
-          right->opcode() == IrOpcode::kInt64Constant) {
-        int64_t offset = OpParameter<int64_t>(right->op());
-        DCHECK(is_int32(offset));
-        inputs[(*input_count)++] = TempImmediate(static_cast<int32_t>(offset));
-        return kMode_Root;
-      }
-    }
     BaseWithIndexAndDisplacement64Matcher m(operand, AddressOption::kAllowAll);
     DCHECK(m.matches());
     if (m.displacement() == nullptr || CanBeImmediate(m.displacement())) {
@@ -2088,8 +2077,8 @@ void InstructionSelector::VisitSwitch(Node* node, const SwitchInfo& sw) {
     }
   }
 
-  // Generate a sequence of conditional jumps.
-  return EmitLookupSwitch(sw, value_operand);
+  // Generate a tree of conditional jumps.
+  return EmitBinarySearchSwitch(sw, value_operand);
 }
 
 

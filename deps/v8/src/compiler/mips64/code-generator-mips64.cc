@@ -774,6 +774,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchJmp:
       AssembleArchJump(i.InputRpo(0));
       break;
+    case kArchBinarySearchSwitch:
+      AssembleArchBinarySearchSwitch(instr);
+      break;
     case kArchLookupSwitch:
       AssembleArchLookupSwitch(instr);
       break;
@@ -827,9 +830,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       } else {
         __ mov(i.OutputRegister(), fp);
       }
-      break;
-    case kArchRootsPointer:
-      __ mov(i.OutputRegister(), kRootRegister);
       break;
     case kArchTruncateDoubleToI:
       __ TruncateDoubleToI(isolate(), zone(), i.OutputRegister(),
@@ -3401,6 +3401,16 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
   }
 }
 
+void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
+  MipsOperandConverter i(this, instr);
+  Register input = i.InputRegister(0);
+  std::vector<std::pair<int32_t, Label*>> cases;
+  for (size_t index = 2; index < instr->InputCount(); index += 2) {
+    cases.push_back({i.InputInt32(index + 0), GetLabel(i.InputRpo(index + 1))});
+  }
+  AssembleArchBinarySearchSwitchRange(input, i.InputRpo(1), cases.data(),
+                                      cases.data() + cases.size());
+}
 
 void CodeGenerator::AssembleArchLookupSwitch(Instruction* instr) {
   MipsOperandConverter i(this, instr);

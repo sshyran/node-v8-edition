@@ -211,7 +211,10 @@ void TurboAssembler::Jump(Handle<Code> code, RelocInfo::Mode rmode,
       Address entry = d.InstructionStartOfBuiltin(builtin_index);
       // Use ip directly instead of using UseScratchRegisterScope, as we do not
       // preserve scratch registers across calls.
-      mov(ip, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
+      // RelocInfo is only necessary if generating code for the snapshot.
+      // Otherwise, the target address is immortal-immovable and never needs to
+      // be fixed up by GC (or deserialization).
+      mov(ip, Operand(entry, RelocInfo::NONE));
       Jump(ip, cond);
       return;
     }
@@ -307,7 +310,10 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
       Address entry = d.InstructionStartOfBuiltin(builtin_index);
       // Use ip directly instead of using UseScratchRegisterScope, as we do not
       // preserve scratch registers across calls.
-      mov(ip, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
+      // RelocInfo is only necessary if generating code for the snapshot.
+      // Otherwise, the target address is immortal-immovable and never needs to
+      // be fixed up by GC (or deserialization).
+      mov(ip, Operand(entry, RelocInfo::NONE));
       Call(ip);
       return;
     }
@@ -413,6 +419,15 @@ void TurboAssembler::RotateInsertSelectBits(Register dst, Register src,
           Operand(static_cast<intptr_t>(endBit.immediate() | 0x80)), shiftAmt);
   else
     risbg(dst, src, startBit, endBit, shiftAmt);
+}
+
+void TurboAssembler::BranchRelativeOnIdxHighP(Register dst, Register inc,
+                                              Label* L) {
+#if V8_TARGET_ARCH_S390X
+  brxhg(dst, inc, L);
+#else
+  brxh(dst, inc, L);
+#endif // V8_TARGET_ARCH_S390X
 }
 
 void TurboAssembler::MultiPush(RegList regs, Register location) {
@@ -4467,6 +4482,16 @@ void TurboAssembler::ResetSpeculationPoisonRegister() {
 
 void TurboAssembler::ComputeCodeStartAddress(Register dst) {
   larl(dst, Operand(-pc_offset() / 2));
+}
+
+void TurboAssembler::JumpIfEqual(Register x, int32_t y, Label* dest) {
+  Cmp32(x, Operand(y));
+  beq(dest);
+}
+
+void TurboAssembler::JumpIfLessThan(Register x, int32_t y, Label* dest) {
+  Cmp32(x, Operand(y));
+  blt(dest);
 }
 
 }  // namespace internal

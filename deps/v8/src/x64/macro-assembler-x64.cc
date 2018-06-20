@@ -1178,7 +1178,6 @@ void TurboAssembler::JumpIfSmi(Register src, Label* on_smi,
   j(smi, on_smi, near_jump);
 }
 
-
 void MacroAssembler::JumpIfNotSmi(Register src,
                                   Label* on_not_smi,
                                   Label::Distance near_jump) {
@@ -1547,7 +1546,10 @@ void TurboAssembler::Jump(Handle<Code> code_object, RelocInfo::Mode rmode,
       CHECK_NE(builtin_index, Builtins::kNoBuiltinId);
       EmbeddedData d = EmbeddedData::FromBlob();
       Address entry = d.InstructionStartOfBuiltin(builtin_index);
-      Move(kScratchRegister, entry, RelocInfo::OFF_HEAP_TARGET);
+      // RelocInfo is only necessary if generating code for the snapshot.
+      // Otherwise, the target address is immortal-immovable and never needs to
+      // be fixed up by GC (or deserialization).
+      Move(kScratchRegister, entry, RelocInfo::NONE);
       jmp(kScratchRegister);
       return;
     }
@@ -1615,7 +1617,7 @@ void TurboAssembler::Call(Handle<Code> code_object, RelocInfo::Mode rmode) {
       CHECK_NE(builtin_index, Builtins::kNoBuiltinId);
       EmbeddedData d = EmbeddedData::FromBlob();
       Address entry = d.InstructionStartOfBuiltin(builtin_index);
-      Move(kScratchRegister, entry, RelocInfo::OFF_HEAP_TARGET);
+      Move(kScratchRegister, entry, RelocInfo::NONE);
       call(kScratchRegister);
       return;
     }

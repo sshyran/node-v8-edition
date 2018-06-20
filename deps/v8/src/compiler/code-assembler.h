@@ -447,7 +447,6 @@ class SloppyTNode : public TNode<T> {
   V(IntPtrLessThanOrEqual, BoolT, WordT, WordT)           \
   V(IntPtrGreaterThan, BoolT, WordT, WordT)               \
   V(IntPtrGreaterThanOrEqual, BoolT, WordT, WordT)        \
-  V(IntPtrEqual, BoolT, WordT, WordT)                     \
   V(Uint32LessThan, BoolT, Word32T, Word32T)              \
   V(Uint32LessThanOrEqual, BoolT, Word32T, Word32T)       \
   V(Uint32GreaterThan, BoolT, Word32T, Word32T)           \
@@ -455,13 +454,7 @@ class SloppyTNode : public TNode<T> {
   V(UintPtrLessThan, BoolT, WordT, WordT)                 \
   V(UintPtrLessThanOrEqual, BoolT, WordT, WordT)          \
   V(UintPtrGreaterThan, BoolT, WordT, WordT)              \
-  V(UintPtrGreaterThanOrEqual, BoolT, WordT, WordT)       \
-  V(WordEqual, BoolT, WordT, WordT)                       \
-  V(WordNotEqual, BoolT, WordT, WordT)                    \
-  V(Word32Equal, BoolT, Word32T, Word32T)                 \
-  V(Word32NotEqual, BoolT, Word32T, Word32T)              \
-  V(Word64Equal, BoolT, Word64T, Word64T)                 \
-  V(Word64NotEqual, BoolT, Word64T, Word64T)
+  V(UintPtrGreaterThanOrEqual, BoolT, WordT, WordT)
 
 #define CODE_ASSEMBLER_BINARY_OP_LIST(V)                                \
   CODE_ASSEMBLER_COMPARE_BINARY_OP_LIST(V)                              \
@@ -531,7 +524,8 @@ TNode<Float64T> Float64Add(TNode<Float64T> a, TNode<Float64T> b);
   V(ChangeInt32ToInt64, Int64T, Int32T)                        \
   V(ChangeUint32ToFloat64, Float64T, Word32T)                  \
   V(ChangeUint32ToUint64, Uint64T, Word32T)                    \
-  V(BitcastInt32ToFloat32, Float32T, Int32T)                   \
+  V(BitcastInt32ToFloat32, Float32T, Word32T)                  \
+  V(BitcastFloat32ToInt32, Word32T, Float32T)                  \
   V(RoundFloat64ToInt32, Int32T, Float64T)                     \
   V(RoundInt32ToFloat32, Int32T, Float32T)                     \
   V(Float64SilenceNaN, Float64T, Float64T)                     \
@@ -723,6 +717,9 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   TNode<BoolT> Int32FalseConstant() {
     return ReinterpretCast<BoolT>(Int32Constant(0));
   }
+  TNode<BoolT> BoolConstant(bool value) {
+    return value ? Int32TrueConstant() : Int32FalseConstant();
+  }
 
   bool ToInt32Constant(Node* node, int32_t& out_value);
   bool ToInt64Constant(Node* node, int64_t& out_value);
@@ -773,9 +770,6 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   // Access to the frame pointer
   Node* LoadFramePointer();
   Node* LoadParentFramePointer();
-
-  // Access to the roots pointer.
-  TNode<IntPtrT> LoadRootsPointer();
 
   // Access to the stack pointer
   Node* LoadStackPointer();
@@ -879,6 +873,18 @@ class V8_EXPORT_PRIVATE CodeAssembler {
                         ReinterpretCast<WordT>(right));
   }
 
+  TNode<BoolT> IntPtrEqual(SloppyTNode<WordT> left, SloppyTNode<WordT> right);
+  TNode<BoolT> WordEqual(SloppyTNode<WordT> left, SloppyTNode<WordT> right);
+  TNode<BoolT> WordNotEqual(SloppyTNode<WordT> left, SloppyTNode<WordT> right);
+  TNode<BoolT> Word32Equal(SloppyTNode<Word32T> left,
+                           SloppyTNode<Word32T> right);
+  TNode<BoolT> Word32NotEqual(SloppyTNode<Word32T> left,
+                              SloppyTNode<Word32T> right);
+  TNode<BoolT> Word64Equal(SloppyTNode<Word64T> left,
+                           SloppyTNode<Word64T> right);
+  TNode<BoolT> Word64NotEqual(SloppyTNode<Word64T> left,
+                              SloppyTNode<Word64T> right);
+
   TNode<Int32T> Int32Add(TNode<Int32T> left, TNode<Int32T> right) {
     return Signed(
         Int32Add(static_cast<Node*>(left), static_cast<Node*>(right)));
@@ -978,7 +984,7 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   TNode<Object> CallRuntime(Runtime::FunctionId function,
                             SloppyTNode<Object> context, TArgs... args) {
     return CallRuntimeImpl(function, context,
-                           implicit_cast<SloppyTNode<Object>>(args)...);
+                           {implicit_cast<SloppyTNode<Object>>(args)...});
   }
 
   template <class... TArgs>
@@ -987,14 +993,14 @@ class V8_EXPORT_PRIVATE CodeAssembler {
     int argc = static_cast<int>(sizeof...(args));
     TNode<Int32T> arity = Int32Constant(argc);
     return TailCallRuntimeImpl(function, arity, context,
-                               implicit_cast<SloppyTNode<Object>>(args)...);
+                               {implicit_cast<SloppyTNode<Object>>(args)...});
   }
 
   template <class... TArgs>
   void TailCallRuntime(Runtime::FunctionId function, TNode<Int32T> arity,
                        SloppyTNode<Object> context, TArgs... args) {
     return TailCallRuntimeImpl(function, arity, context,
-                               implicit_cast<SloppyTNode<Object>>(args)...);
+                               {implicit_cast<SloppyTNode<Object>>(args)...});
   }
 
   template <class... TArgs>
@@ -1005,7 +1011,7 @@ class V8_EXPORT_PRIVATE CodeAssembler {
     TNode<Int32T> arity = Int32Constant(argc);
     return TailCallRuntimeWithCEntryImpl(
         function, arity, centry, context,
-        implicit_cast<SloppyTNode<Object>>(args)...);
+        {implicit_cast<SloppyTNode<Object>>(args)...});
   }
 
   //
@@ -1016,22 +1022,22 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   TNode<T> CallStub(Callable const& callable, SloppyTNode<Object> context,
                     TArgs... args) {
     TNode<Code> target = HeapConstant(callable.code());
-    return CallStub<T>(callable.descriptor(), target, context,
-                       implicit_cast<Node*>(args)...);
+    return CallStub<T>(callable.descriptor(), target, context, args...);
   }
 
   template <class T = Object, class... TArgs>
   TNode<T> CallStub(const CallInterfaceDescriptor& descriptor,
                     SloppyTNode<Code> target, SloppyTNode<Object> context,
                     TArgs... args) {
-    return UncheckedCast<T>(CallStubR(descriptor, 1, target, context,
-                                      implicit_cast<Node*>(args)...));
+    return UncheckedCast<T>(CallStubR(descriptor, 1, target, context, args...));
   }
 
   template <class... TArgs>
   Node* CallStubR(const CallInterfaceDescriptor& descriptor, size_t result_size,
                   SloppyTNode<Code> target, SloppyTNode<Object> context,
-                  TArgs... args);
+                  TArgs... args) {
+    return CallStubRImpl(descriptor, result_size, target, context, {args...});
+  }
 
   Node* CallStubN(const CallInterfaceDescriptor& descriptor, size_t result_size,
                   int input_count, Node* const* inputs,
@@ -1048,8 +1054,7 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   void TailCallStub(const CallInterfaceDescriptor& descriptor,
                     SloppyTNode<Code> target, SloppyTNode<Object> context,
                     TArgs... args) {
-    return TailCallStubImpl(descriptor, target, context,
-                            implicit_cast<Node*>(args)...);
+    return TailCallStubImpl(descriptor, target, context, {args...});
   }
 
   template <class... TArgs>
@@ -1058,8 +1063,11 @@ class V8_EXPORT_PRIVATE CodeAssembler {
 
   template <class... TArgs>
   Node* TailCallStubThenBytecodeDispatch(
-      const CallInterfaceDescriptor& descriptor, Node* context, Node* target,
-      TArgs... args);
+      const CallInterfaceDescriptor& descriptor, Node* target, Node* context,
+      TArgs... args) {
+    return TailCallStubThenBytecodeDispatchImpl(descriptor, target, context,
+                                                {args...});
+  }
 
   // Tailcalls to the given code object with JSCall linkage. The JS arguments
   // (including receiver) are supposed to be already on the stack.
@@ -1181,23 +1189,32 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   PoisoningMitigationLevel poisoning_level() const;
 
  private:
-  template <class... TArgs>
   TNode<Object> CallRuntimeImpl(Runtime::FunctionId function,
-                                TNode<Object> context, TArgs... args);
+                                TNode<Object> context,
+                                std::initializer_list<TNode<Object>> args);
 
-  template <class... TArgs>
   void TailCallRuntimeImpl(Runtime::FunctionId function, TNode<Int32T> arity,
-                           TNode<Object> context, TArgs... args);
+                           TNode<Object> context,
+                           std::initializer_list<TNode<Object>> args);
 
-  template <class... TArgs>
   void TailCallRuntimeWithCEntryImpl(Runtime::FunctionId function,
                                      TNode<Int32T> arity, TNode<Code> centry,
-                                     TNode<Object> context, TArgs... args);
+                                     TNode<Object> context,
+                                     std::initializer_list<TNode<Object>> args);
 
-  template <class... TArgs>
   void TailCallStubImpl(const CallInterfaceDescriptor& descriptor,
                         TNode<Code> target, TNode<Object> context,
-                        TArgs... args);
+                        std::initializer_list<Node*> args);
+
+  Node* TailCallStubThenBytecodeDispatchImpl(
+      const CallInterfaceDescriptor& descriptor, Node* target, Node* context,
+      std::initializer_list<Node*> args);
+
+  Node* CallStubRImpl(const CallInterfaceDescriptor& descriptor,
+                      size_t result_size, SloppyTNode<Code> target,
+                      SloppyTNode<Object> context,
+                      std::initializer_list<Node*> args);
+
   // These two don't have definitions and are here only for catching use cases
   // where the cast is not necessary.
   TNode<Int32T> Signed(TNode<Int32T> x);

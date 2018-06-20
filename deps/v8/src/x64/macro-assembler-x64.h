@@ -26,9 +26,13 @@ constexpr Register kInterpreterAccumulatorRegister = rax;
 constexpr Register kInterpreterBytecodeOffsetRegister = r9;
 constexpr Register kInterpreterBytecodeArrayRegister = r14;
 constexpr Register kInterpreterDispatchTableRegister = r15;
+
 constexpr Register kJavaScriptCallArgCountRegister = rax;
 constexpr Register kJavaScriptCallCodeStartRegister = rcx;
+constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
 constexpr Register kJavaScriptCallNewTargetRegister = rdx;
+constexpr Register kJavaScriptCallExtraArg1Register = rbx;
+
 constexpr Register kRuntimeCallFunctionRegister = rbx;
 constexpr Register kRuntimeCallArgCountRegister = rax;
 constexpr Register kWasmInstanceRegister = rsi;
@@ -321,6 +325,16 @@ class TurboAssembler : public TurboAssemblerBase {
   // Jump to label if the value is a tagged smi.
   void JumpIfSmi(Register src, Label* on_smi,
                  Label::Distance near_jump = Label::kFar);
+
+  void JumpIfEqual(Register a, int32_t b, Label* dest) {
+    cmpl(a, Immediate(b));
+    j(equal, dest);
+  }
+
+  void JumpIfLessThan(Register a, int32_t b, Label* dest) {
+    cmpl(a, Immediate(b));
+    j(less, dest);
+  }
 
   void Move(Register dst, Smi* source);
 

@@ -135,8 +135,6 @@ class CodeStub : public ZoneObject {
     return GetCallInterfaceDescriptor().GetStackParameterCount();
   }
 
-  virtual void InitializeDescriptor(CodeStubDescriptor* descriptor) {}
-
   static void InitializeDescriptor(Isolate* isolate, uint32_t key,
                                    CodeStubDescriptor* desc);
 
@@ -243,7 +241,7 @@ class CodeStub : public ZoneObject {
  public:                                                                \
   typedef NAME##Descriptor Descriptor;                                  \
   CallInterfaceDescriptor GetCallInterfaceDescriptor() const override { \
-    return Descriptor(isolate());                                       \
+    return Descriptor();                                                \
   }
 
 // There are some code stubs we just can't describe right now with a

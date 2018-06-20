@@ -252,7 +252,6 @@ void ImplementationVisitor::Visit(TorqueBuiltinDeclaration* decl,
   GenerateIndent();
   source_out() << "TNode<Context> " << val->GetValueForDeclaration()
                << " = UncheckedCast<Context>(Parameter("
-               << (builtin->IsVarArgsJavaScript() ? "Builtin" : "")
                << "Descriptor::kContext));" << std::endl;
   GenerateIndent();
   source_out() << "USE(" << val->GetValueForDeclaration() << ");" << std::endl;
@@ -265,7 +264,7 @@ void ImplementationVisitor::Visit(TorqueBuiltinDeclaration* decl,
     std::string arguments_name = arguments->GetValueForDeclaration();
     GenerateIndent();
     source_out()
-        << "Node* argc = Parameter(BuiltinDescriptor::kArgumentsCount);"
+        << "Node* argc = Parameter(Descriptor::kJSActualArgumentsCount);"
         << std::endl;
     GenerateIndent();
     source_out() << "CodeStubArguments arguments_impl(this, "
@@ -491,11 +490,10 @@ VisitResult ImplementationVisitor::Visit(NumberLiteralExpression* expr) {
 }
 
 VisitResult ImplementationVisitor::Visit(StringLiteralExpression* expr) {
-  std::string temp = GenerateNewTempVariable(TypeOracle::GetStringType());
-  source_out() << "StringConstant(\""
-               << expr->literal.substr(1, expr->literal.size() - 2) << "\");"
-               << std::endl;
-  return VisitResult{TypeOracle::GetStringType(), temp};
+  std::string temp = GenerateNewTempVariable(TypeOracle::GetConstStringType());
+  source_out() << "\"" << expr->literal.substr(1, expr->literal.size() - 2)
+               << "\";" << std::endl;
+  return VisitResult{TypeOracle::GetConstStringType(), temp};
 }
 
 VisitResult ImplementationVisitor::GetBuiltinCode(Builtin* builtin) {
@@ -567,7 +565,8 @@ const Type* ImplementationVisitor::Visit(IfStatement* stmt) {
 
     if (!(expression_result.type() == TypeOracle::GetConstexprBoolType())) {
       std::stringstream stream;
-      stream << "expression should return type \"constexpr bool\" but doesn't";
+      stream << "expression should return type constexpr bool "
+             << "but returns type " << expression_result.type();
       ReportError(stream.str());
     }
 

@@ -42,7 +42,7 @@ TestingModuleBuilder::TestingModuleBuilder(
   if (maybe_import) {
     // Manually compile a wasm to JS wrapper and insert it into the instance.
     CodeSpaceMemoryModificationScope modification_scope(isolate_->heap());
-    Handle<Code> code = compiler::CompileWasmToJSWrapper(
+    MaybeHandle<Code> code = compiler::CompileWasmToJSWrapper(
         isolate_, maybe_import->js_function, maybe_import->sig,
         maybe_import_index, test_module_->origin,
         trap_handler::IsTrapHandlerEnabled() ? kUseTrapHandler
@@ -51,7 +51,8 @@ TestingModuleBuilder::TestingModuleBuilder(
       native_module_->SetNumFunctionsForTesting(maybe_import_index + 1);
     }
     auto wasm_to_js_wrapper = native_module_->AddCodeCopy(
-        code, wasm::WasmCode::kWasmToJsWrapper, maybe_import_index);
+        code.ToHandleChecked(), wasm::WasmCode::kWasmToJsWrapper,
+        maybe_import_index);
 
     ImportedFunctionEntry(instance_object_, maybe_import_index)
         .set_wasm_to_js(*maybe_import->js_function, wasm_to_js_wrapper);
@@ -118,10 +119,11 @@ uint32_t TestingModuleBuilder::AddFunction(FunctionSig* sig, const char* name) {
 Handle<JSFunction> TestingModuleBuilder::WrapCode(uint32_t index) {
   // Wrap the code so it can be called as a JS function.
   Link();
-  wasm::WasmCode* code = native_module_->code(index);
-  Handle<Code> ret_code = compiler::CompileJSToWasmWrapper(
-      isolate_, test_module_ptr_, code->instruction_start(), index,
+  Address target = native_module_->GetCallTargetForFunction(index);
+  MaybeHandle<Code> maybe_ret_code = compiler::CompileJSToWasmWrapper(
+      isolate_, test_module_ptr_, target, index,
       trap_handler::IsTrapHandlerEnabled() ? kUseTrapHandler : kNoTrapHandler);
+  Handle<Code> ret_code = maybe_ret_code.ToHandleChecked();
   Handle<JSFunction> ret = WasmExportedFunction::New(
       isolate_, instance_object(), MaybeHandle<String>(),
       static_cast<int>(index),
@@ -165,9 +167,9 @@ void TestingModuleBuilder::PopulateIndirectFunctionTable() {
     for (int j = 0; j < table_size; j++) {
       WasmFunction& function = test_module_->functions[table.values[j]];
       int sig_id = test_module_->signature_map.Find(function.sig);
-      auto wasm_code = native_module_->code(function.func_index);
-      IndirectFunctionTableEntry(instance, j)
-          .set(sig_id, *instance, wasm_code->instruction_start());
+      auto target =
+          native_module_->GetCallTargetForFunction(function.func_index);
+      IndirectFunctionTableEntry(instance, j).set(sig_id, *instance, target);
     }
   }
 }
@@ -210,21 +212,16 @@ const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {
 Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
   Handle<SeqOneByteString> empty_string = Handle<SeqOneByteString>::cast(
       isolate_->factory()->NewStringFromOneByte({}).ToHandleChecked());
-  size_t module_size = 0;
-  auto managed_module =
-      Managed<WasmModule>::FromSharedPtr(isolate_, module_size, test_module_);
-  DCHECK_EQ(test_module_ptr_, managed_module->raw());
   Handle<Script> script =
       isolate_->factory()->NewScript(isolate_->factory()->empty_string());
   script->set_type(Script::TYPE_WASM);
   Handle<FixedArray> export_wrappers = isolate_->factory()->NewFixedArray(0);
   ModuleEnv env = CreateModuleEnv();
-  Handle<WasmCompiledModule> compiled_module =
-      WasmCompiledModule::New(isolate_, test_module_ptr_, env);
-  Handle<WasmModuleObject> module_object = WasmModuleObject::New(
-      isolate_, compiled_module, export_wrappers, managed_module, empty_string,
-      script, Handle<ByteArray>::null());
-  compiled_module->GetNativeModule()->SetModuleObject(module_object);
+  Handle<WasmModuleObject> module_object =
+      WasmModuleObject::New(isolate_, export_wrappers, test_module_, env,
+                            empty_string, script, Handle<ByteArray>::null());
+  Handle<WasmCompiledModule> compiled_module(module_object->compiled_module(),
+                                             isolate_);
   // This method is called when we initialize TestEnvironment. We don't
   // have a memory yet, so we won't create it here. We'll update the
   // interpreter when we get a memory. We do have globals, though.
@@ -343,7 +340,8 @@ void WasmFunctionWrapper::Init(CallDescriptor* call_descriptor,
 }
 
 Handle<Code> WasmFunctionWrapper::GetWrapperCode() {
-  if (code_.is_null()) {
+  Handle<Code> code;
+  if (!code_.ToHandle(&code)) {
     Isolate* isolate = CcTest::InitIsolateOnce();
 
     auto call_descriptor =
@@ -368,18 +366,18 @@ Handle<Code> WasmFunctionWrapper::GetWrapperCode() {
                                   Code::C_WASM_ENTRY);
     code_ = compiler::Pipeline::GenerateCodeForTesting(
         &info, isolate, call_descriptor, graph(), nullptr);
-    CHECK(!code_.is_null());
+    code = code_.ToHandleChecked();
 #ifdef ENABLE_DISASSEMBLER
     if (FLAG_print_opt_code) {
       CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
       OFStream os(tracing_scope.file());
 
-      code_->Disassemble("wasm wrapper", os);
+      code->Disassemble("wasm wrapper", os);
     }
 #endif
   }
 
-  return code_;
+  return code;
 }
 
 void WasmFunctionCompiler::Build(const byte* start, const byte* end) {
@@ -439,9 +437,6 @@ void WasmFunctionCompiler::Build(const byte* start, const byte* end) {
     wasm_code->LogCode(isolate());
   }
   CHECK(!thrower.error());
-  if (trap_handler::IsTrapHandlerEnabled()) {
-    native_module->UnpackAndRegisterProtectedInstructions();
-  }
 }
 
 WasmFunctionCompiler::WasmFunctionCompiler(Zone* zone, FunctionSig* sig,

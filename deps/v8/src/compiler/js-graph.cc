@@ -66,6 +66,33 @@ Node* JSGraph::Constant(Handle<Object> value) {
   }
 }
 
+Node* JSGraph::Constant(const JSHeapBroker* broker, const ObjectRef& ref) {
+  if (ref.IsSmi()) return Constant(ref.AsSmi());
+  HeapObjectType type = ref.AsHeapObjectRef().type(broker);
+  if (ref.IsHeapNumber()) {
+    return Constant(ref.AsHeapNumber().value());
+  } else if (type.oddball_type() == HeapObjectType::kUndefined) {
+    DCHECK(
+        ref.object<Object>().equals(isolate()->factory()->undefined_value()));
+    return UndefinedConstant();
+  } else if (type.oddball_type() == HeapObjectType::kNull) {
+    DCHECK(ref.object<Object>().equals(isolate()->factory()->null_value()));
+    return NullConstant();
+  } else if (type.oddball_type() == HeapObjectType::kHole) {
+    DCHECK(ref.object<Object>().equals(isolate()->factory()->the_hole_value()));
+    return TheHoleConstant();
+  } else if (type.oddball_type() == HeapObjectType::kBoolean) {
+    if (ref.object<Object>().equals(isolate()->factory()->true_value())) {
+      return TrueConstant();
+    } else {
+      DCHECK(ref.object<Object>().equals(isolate()->factory()->false_value()));
+      return FalseConstant();
+    }
+  } else {
+    return HeapConstant(ref.object<HeapObject>());
+  }
+}
+
 Node* JSGraph::Constant(double value) {
   if (bit_cast<int64_t>(value) == bit_cast<int64_t>(0.0)) return ZeroConstant();
   if (bit_cast<int64_t>(value) == bit_cast<int64_t>(1.0)) return OneConstant();

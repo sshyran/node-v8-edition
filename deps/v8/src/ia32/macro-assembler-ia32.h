@@ -26,9 +26,13 @@ constexpr Register kInterpreterAccumulatorRegister = eax;
 constexpr Register kInterpreterBytecodeOffsetRegister = edx;
 constexpr Register kInterpreterBytecodeArrayRegister = edi;
 constexpr Register kInterpreterDispatchTableRegister = esi;
+
 constexpr Register kJavaScriptCallArgCountRegister = eax;
 constexpr Register kJavaScriptCallCodeStartRegister = ecx;
+constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
 constexpr Register kJavaScriptCallNewTargetRegister = edx;
+constexpr Register kJavaScriptCallExtraArg1Register = ebx;
+
 constexpr Register kOffHeapTrampolineRegister = ecx;
 constexpr Register kRuntimeCallFunctionRegister = ebx;
 constexpr Register kRuntimeCallArgCountRegister = eax;
@@ -140,6 +144,16 @@ class TurboAssembler : public TurboAssemblerBase {
                         Label::Distance distance = Label::kFar) {
     test(value, Immediate(kSmiTagMask));
     j(zero, smi_label, distance);
+  }
+
+  void JumpIfEqual(Register a, int32_t b, Label* dest) {
+    cmp(a, Immediate(b));
+    j(equal, dest);
+  }
+
+  void JumpIfLessThan(Register a, int32_t b, Label* dest) {
+    cmp(a, Immediate(b));
+    j(less, dest);
   }
 
   void SmiUntag(Register reg) { sar(reg, kSmiTagSize); }

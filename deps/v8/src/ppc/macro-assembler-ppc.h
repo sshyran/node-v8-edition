@@ -27,9 +27,13 @@ constexpr Register kInterpreterAccumulatorRegister = r3;
 constexpr Register kInterpreterBytecodeOffsetRegister = r15;
 constexpr Register kInterpreterBytecodeArrayRegister = r16;
 constexpr Register kInterpreterDispatchTableRegister = r17;
+
 constexpr Register kJavaScriptCallArgCountRegister = r3;
-constexpr Register kJavaScriptCallNewTargetRegister = r6;
 constexpr Register kJavaScriptCallCodeStartRegister = r5;
+constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
+constexpr Register kJavaScriptCallNewTargetRegister = r6;
+constexpr Register kJavaScriptCallExtraArg1Register = r5;
+
 constexpr Register kOffHeapTrampolineRegister = ip;
 constexpr Register kRuntimeCallFunctionRegister = r4;
 constexpr Register kRuntimeCallArgCountRegister = r3;
@@ -225,6 +229,8 @@ class TurboAssembler : public TurboAssemblerBase {
   void StoreSingleU(DoubleRegister src, const MemOperand& mem,
                     Register scratch = no_reg);
 
+  void Cmpi(Register src1, const Operand& src2, Register scratch,
+            CRegister cr = cr7);
   void Cmpli(Register src1, const Operand& src2, Register scratch,
              CRegister cr = cr7);
   void Cmpwi(Register src1, const Operand& src2, Register scratch,
@@ -616,6 +622,9 @@ class TurboAssembler : public TurboAssemblerBase {
     TestIfSmi(value, r0);
     beq(smi_label, cr0);  // branch if SMI
   }
+  void JumpIfEqual(Register x, int32_t y, Label* dest);
+  void JumpIfLessThan(Register x, int32_t y, Label* dest);
+
 #if V8_TARGET_ARCH_PPC64
   inline void TestIfInt32(Register value, Register scratch,
                           CRegister cr = cr7) {
@@ -804,8 +813,6 @@ class MacroAssembler : public TurboAssembler {
   void LoadDoubleU(DoubleRegister dst, const MemOperand& mem,
                    Register scratch = no_reg);
 
-  void Cmpi(Register src1, const Operand& src2, Register scratch,
-            CRegister cr = cr7);
   void Cmplwi(Register src1, const Operand& src2, Register scratch,
               CRegister cr = cr7);
   void And(Register ra, Register rs, const Operand& rb, RCBit rc = LeaveRC);

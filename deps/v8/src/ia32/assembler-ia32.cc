@@ -187,8 +187,10 @@ void Displacement::init(Label* L, Type type) {
 // Implementation of RelocInfo
 
 const int RelocInfo::kApplyMask =
-    RelocInfo::kCodeTargetMask | 1 << RelocInfo::RUNTIME_ENTRY |
-    1 << RelocInfo::INTERNAL_REFERENCE | 1 << RelocInfo::JS_TO_WASM_CALL;
+    RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
+    RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY) |
+    RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
+    RelocInfo::ModeMask(RelocInfo::JS_TO_WASM_CALL);
 
 bool RelocInfo::IsCodedSpecially() {
   // The deserializer needs to know whether a pointer is specially coded.  Being
@@ -3212,6 +3214,12 @@ void Assembler::GrowBuffer() {
   for (auto pos : internal_reference_positions_) {
     int32_t* p = reinterpret_cast<int32_t*>(buffer_ + pos);
     *p += pc_delta;
+  }
+
+  // Relocate js-to-wasm calls (which are encoded pc-relative).
+  for (RelocIterator it(desc, RelocInfo::ModeMask(RelocInfo::JS_TO_WASM_CALL));
+       !it.done(); it.next()) {
+    it.rinfo()->apply(pc_delta);
   }
 
   DCHECK(!buffer_overflow());

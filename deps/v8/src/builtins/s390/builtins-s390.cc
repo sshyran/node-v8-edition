@@ -469,24 +469,24 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ ShiftLeftP(r5, r5, Operand(kPointerSizeLog2));
     __ SubP(sp, r5);
 
-    // r1 = stack offset
+    // ip = stack offset
     // r5 = parameter array offset
-    __ LoadImmP(r1, Operand::Zero());
+    __ LoadImmP(ip, Operand::Zero());
     __ SubP(r5, Operand(kPointerSize));
     __ blt(&done_loop);
+
+    __ lgfi(r1, Operand(-kPointerSize));
 
     __ bind(&loop);
 
     // parameter copy loop
     __ LoadP(r0, FieldMemOperand(r4, r5, FixedArray::kHeaderSize));
-    __ StoreP(r0, MemOperand(sp, r1));
+    __ StoreP(r0, MemOperand(sp, ip));
 
     // update offsets
-    __ lay(r1, MemOperand(r1, kPointerSize));
-    // TODO(john-yan): combine SubP/bge with brxh/brxhg
-    __ SubP(r5, Operand(kPointerSize));
+    __ lay(ip, MemOperand(ip, kPointerSize));
 
-    __ bge(&loop);
+    __ BranchRelativeOnIdxHighP(r5, r1, &loop);
 
     __ bind(&done_loop);
   }
@@ -495,7 +495,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   if (FLAG_debug_code) {
     __ LoadP(r5, FieldMemOperand(r6, JSFunction::kSharedFunctionInfoOffset));
     __ LoadP(r5, FieldMemOperand(r5, SharedFunctionInfo::kFunctionDataOffset));
-    GetSharedFunctionInfoBytecode(masm, r5, r1);
+    GetSharedFunctionInfoBytecode(masm, r5, ip);
     __ CompareObjectType(r5, r5, r5, BYTECODE_ARRAY_TYPE);
     __ Assert(eq, AbortReason::kMissingBytecodeArray);
   }
@@ -2373,6 +2373,9 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
 }
 
 void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
+  // The function index was put in r7 by the jump table trampoline.
+  // Convert to Smi for the runtime call.
+  __ SmiTag(r7, r7);
   {
     TrapOnAbortScope trap_on_abort_scope(masm);  // Avoid calls to Abort.
     FrameAndConstantPoolScope scope(masm, StackFrame::WASM_COMPILE_LAZY);
@@ -2389,8 +2392,9 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ MultiPush(gp_regs);
     __ MultiPushDoubles(fp_regs);
 
-    // Pass the WASM instance as an explicit argument to WasmCompileLazy.
-    __ Push(kWasmInstanceRegister);
+    // Pass instance and function index as explicit arguments to the runtime
+    // function.
+    __ Push(kWasmInstanceRegister, r7);
     // Load the correct CEntry builtin from the instance object.
     __ LoadP(r4, FieldMemOperand(kWasmInstanceRegister,
                                  WasmInstanceObject::kCEntryStubOffset));

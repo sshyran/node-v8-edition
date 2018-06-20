@@ -138,15 +138,15 @@ struct IteratorRecord {
                 EXPAND(CSA_ASSERT_GET_FIRST_STR(__VA_ARGS__)), __FILE__, \
                 __LINE__, CSA_ASSERT_STRINGIFY_EXTRA_VALUES(__VA_ARGS__))
 
-#define CSA_ASSERT_JS_ARGC_OP(csa, Op, op, expected)                     \
-  (csa)->Assert(                                                         \
-      [&]() -> compiler::Node* {                                         \
-        compiler::Node* const argc =                                     \
-            (csa)->Parameter(Descriptor::kActualArgumentsCount);         \
-        return (csa)->Op(argc, (csa)->Int32Constant(expected));          \
-      },                                                                 \
-      "argc " #op " " #expected, __FILE__, __LINE__,                     \
-      SmiFromInt32((csa)->Parameter(Descriptor::kActualArgumentsCount)), \
+#define CSA_ASSERT_JS_ARGC_OP(csa, Op, op, expected)                       \
+  (csa)->Assert(                                                           \
+      [&]() -> compiler::Node* {                                           \
+        compiler::Node* const argc =                                       \
+            (csa)->Parameter(Descriptor::kJSActualArgumentsCount);         \
+        return (csa)->Op(argc, (csa)->Int32Constant(expected));            \
+      },                                                                   \
+      "argc " #op " " #expected, __FILE__, __LINE__,                       \
+      SmiFromInt32((csa)->Parameter(Descriptor::kJSActualArgumentsCount)), \
       "argc")
 
 #define CSA_ASSERT_JS_ARGC_EQ(csa, expected) \
@@ -354,6 +354,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
     return p_o;
   }
 
+  TNode<NumberDictionary> UnsafeCastObjectToNumberDictionary(
+      TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<JSReceiver> UnsafeCastObjectToJSReceiver(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
+  TNode<JSObject> UnsafeCastObjectToJSObject(TNode<Object> p_o) {
+    return CAST(p_o);
+  }
+
   Node* MatchesParameterMode(Node* value, ParameterMode mode);
 
 #define PARAMETER_BINOP(OpName, IntPtrOpName, SmiOpName) \
@@ -396,9 +409,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
   TNode<Int32T> HashSeed();
 
   Node* IntPtrOrSmiConstant(int value, ParameterMode mode);
-  TNode<BoolT> BoolConstant(bool value) {
-    return value ? Int32TrueConstant() : Int32FalseConstant();
-  }
   TNode<Smi> LanguageModeConstant(LanguageMode mode) {
     return SmiConstant(static_cast<int>(mode));
   }
@@ -2130,9 +2140,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
                               TVariable<IntPtrT>* var_entry,
                               Label* if_not_found);
 
-  TNode<Object> LoadNumberDictionaryElement(TNode<NumberDictionary> dictionary,
-                                            TNode<IntPtrT> intptr_index,
-                                            Label* not_data, Label* if_hole);
+  TNode<Object> BasicLoadNumberDictionaryElement(
+      TNode<NumberDictionary> dictionary, TNode<IntPtrT> intptr_index,
+      Label* not_data, Label* if_hole);
+  void BasicStoreNumberDictionaryElement(TNode<NumberDictionary> dictionary,
+                                         TNode<IntPtrT> intptr_index,
+                                         TNode<Object> value, Label* fail,
+                                         Label* if_hole);
 
   template <class Dictionary>
   void FindInsertionEntry(TNode<Dictionary> dictionary, TNode<Name> key,

@@ -51,20 +51,6 @@ constexpr bool kModuleCanAllocateMoreMemory = true;
 
 constexpr bool kNeedsTrampoline = !kModuleCanAllocateMoreMemory;
 
-void RelocateCode(WasmCode* code, const WasmCode* orig,
-                  WasmCode::FlushICache flush_icache) {
-  intptr_t delta = code->instruction_start() - orig->instruction_start();
-  for (RelocIterator it(code->instructions(), code->reloc_info(),
-                        code->constant_pool(), RelocInfo::kApplyMask);
-       !it.done(); it.next()) {
-    it.rinfo()->apply(delta);
-  }
-  if (flush_icache) {
-    Assembler::FlushICache(code->instructions().start(),
-                           code->instructions().size());
-  }
-}
-
 }  // namespace
 
 void DisjointAllocationPool::Merge(AddressRange range) {
@@ -139,8 +125,8 @@ void WasmCode::set_trap_handler_index(size_t value) {
 }
 
 void WasmCode::RegisterTrapHandlerData() {
+  DCHECK(!HasTrapHandlerIndex());
   if (kind() != wasm::WasmCode::kFunction) return;
-  if (HasTrapHandlerIndex()) return;
 
   Address base = instruction_start();
 
@@ -155,8 +141,6 @@ void WasmCode::RegisterTrapHandlerData() {
 }
 
 bool WasmCode::HasTrapHandlerIndex() const { return trap_handler_index_ >= 0; }
-
-void WasmCode::ResetTrapHandlerIndex() { trap_handler_index_ = -1; }
 
 bool WasmCode::ShouldBeLogged(Isolate* isolate) {
   return isolate->logger()->is_listening_to_code_events() ||
@@ -194,17 +178,6 @@ void WasmCode::Validate() const {
        !it.done(); it.next()) {
     RelocInfo::Mode mode = it.rinfo()->rmode();
     switch (mode) {
-      case RelocInfo::CODE_TARGET: {
-        Address target = it.rinfo()->target_address();
-        Code* code = native_module_->ReverseTrampolineLookup(target);
-        // TODO(7424): This is by now limited to only contain references to a
-        // limited set of builtins. This code will eventually be completely free
-        // of {RelocInfo::CODE_TARGET} relocation entries altogether.
-        int builtin_index = code->builtin_index();
-        CHECK(builtin_index == Builtins::kAllocateHeapNumber ||
-              builtin_index == Builtins::kToNumber);
-        break;
-      }
       case RelocInfo::WASM_STUB_CALL: {
         Address target = it.rinfo()->wasm_stub_call_address();
         WasmCode* code = native_module_->Lookup(target);
@@ -298,6 +271,8 @@ const char* GetWasmCodeKindAsString(WasmCode::Kind kind) {
       return "interpreter entry";
     case WasmCode::kTrampoline:
       return "trampoline";
+    case WasmCode::kJumpTable:
+      return "jump table";
   }
   return "unknown kind";
 }
@@ -318,26 +293,30 @@ WasmCode::~WasmCode() {
 base::AtomicNumber<size_t> NativeModule::next_id_;
 
 NativeModule::NativeModule(Isolate* isolate, uint32_t num_functions,
-                           uint32_t num_imports, bool can_request_more,
-                           VirtualMemory* code_space,
+                           uint32_t num_imported_functions,
+                           bool can_request_more, VirtualMemory* code_space,
                            WasmCodeManager* code_manager, ModuleEnv& env)
     : instance_id(next_id_.Increment(1)),
       num_functions_(num_functions),
-      num_imported_functions_(num_imports),
+      num_imported_functions_(num_imported_functions),
       compilation_state_(NewCompilationState(isolate, env)),
       free_code_space_({code_space->address(), code_space->end()}),
       wasm_code_manager_(code_manager),
       can_request_more_memory_(can_request_more),
       use_trap_handler_(env.use_trap_handler) {
-  if (num_functions > 0) {
-    uint32_t num_wasm_functions = num_functions - num_imports;
-    code_table_.reset(new WasmCode*[num_wasm_functions]);
-    memset(code_table_.get(), 0, num_wasm_functions * sizeof(WasmCode*));
-  }
   VirtualMemory my_mem;
   owned_code_space_.push_back(my_mem);
   owned_code_space_.back().TakeControl(code_space);
   owned_code_.reserve(num_functions);
+
+  DCHECK_LE(num_imported_functions, num_functions);
+  uint32_t num_wasm_functions = num_functions - num_imported_functions;
+  if (num_wasm_functions > 0) {
+    code_table_.reset(new WasmCode*[num_wasm_functions]);
+    memset(code_table_.get(), 0, num_wasm_functions * sizeof(WasmCode*));
+
+    jump_table_ = CreateEmptyJumpTable(num_wasm_functions);
+  }
 }
 
 void NativeModule::ReserveCodeTableForTesting(uint32_t max_functions) {
@@ -348,6 +327,9 @@ void NativeModule::ReserveCodeTableForTesting(uint32_t max_functions) {
   memset(new_table, 0, max_wasm * sizeof(*new_table));
   memcpy(new_table, code_table_.get(), num_wasm * sizeof(*new_table));
   code_table_.reset(new_table);
+
+  // Re-allocate jump table.
+  jump_table_ = CreateEmptyJumpTable(max_wasm);
 }
 
 void NativeModule::SetNumFunctionsForTesting(uint32_t num_functions) {
@@ -358,6 +340,16 @@ void NativeModule::SetCodeForTesting(uint32_t index, WasmCode* code) {
   DCHECK_LT(index, num_functions_);
   DCHECK_LE(num_imported_functions_, index);
   code_table_[index - num_imported_functions_] = code;
+}
+
+void NativeModule::LogWasmCodes(Isolate* isolate) {
+  if (!wasm::WasmCode::ShouldBeLogged(isolate)) return;
+
+  // TODO(titzer): we skip the logging of the import wrappers
+  // here, but they should be included somehow.
+  for (wasm::WasmCode* code : code_table()) {
+    if (code != nullptr) code->LogCode(isolate);
+  }
 }
 
 WasmCode* NativeModule::AddOwnedCode(
@@ -394,6 +386,7 @@ WasmCode* NativeModule::AddOwnedCode(
       std::upper_bound(owned_code_.begin(), owned_code_.end(),
                        ret->instruction_start(), WasmCodeUniquePtrComparator());
   owned_code_.insert(insert_before, std::move(code));
+
   if (flush_icache) {
     Assembler::FlushICache(ret->instructions().start(),
                            ret->instructions().size());
@@ -414,14 +407,29 @@ WasmCode* NativeModule::AddCodeCopy(Handle<Code> code, WasmCode::Kind kind,
 WasmCode* NativeModule::AddInterpreterEntry(Handle<Code> code, uint32_t index) {
   WasmCode* ret = AddAnonymousCode(code, WasmCode::kInterpreterEntry);
   ret->index_ = Just(index);
+  PatchJumpTable(index, ret->instruction_start(), WasmCode::kFlushICache);
   return ret;
 }
 
 void NativeModule::SetLazyBuiltin(Handle<Code> code) {
+  uint32_t num_wasm_functions = num_functions_ - num_imported_functions_;
+  if (num_wasm_functions == 0) return;
   WasmCode* lazy_builtin = AddAnonymousCode(code, WasmCode::kLazyStub);
-  for (WasmCode*& code_table_entry : code_table()) {
-    code_table_entry = lazy_builtin;
+  // Fill the jump table with jumps to the lazy compile stub.
+  Address lazy_compile_target = lazy_builtin->instruction_start();
+  JumpTableAssembler jtasm(
+      jump_table_->instruction_start(),
+      static_cast<int>(jump_table_->instructions().size()) + 256);
+  for (uint32_t i = 0; i < num_wasm_functions; ++i) {
+    // Check that the offset in the jump table increases as expected.
+    DCHECK_EQ(i * JumpTableAssembler::kJumpTableSlotSize, jtasm.pc_offset());
+    jtasm.EmitLazyCompileJumpSlot(i + num_imported_functions_,
+                                  lazy_compile_target);
+    jtasm.NopBytes((i + 1) * JumpTableAssembler::kJumpTableSlotSize -
+                   jtasm.pc_offset());
   }
+  Assembler::FlushICache(jump_table_->instructions().start(),
+                         jump_table_->instructions().size());
 }
 
 void NativeModule::SetRuntimeStubs(Isolate* isolate) {
@@ -489,7 +497,7 @@ WasmCode* NativeModule::AddAnonymousCode(Handle<Code> code,
 
   // Apply the relocation delta by iterating over the RelocInfo.
   intptr_t delta = ret->instruction_start() - code->InstructionStart();
-  int mode_mask = RelocInfo::kApplyMask | RelocInfo::kCodeTargetMask |
+  int mode_mask = RelocInfo::kApplyMask |
                   RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL);
   RelocIterator orig_it(*code, mode_mask);
   for (RelocIterator it(ret->instructions(), ret->reloc_info(),
@@ -503,12 +511,6 @@ WasmCode* NativeModule::AddAnonymousCode(Handle<Code> code,
           runtime_stub(static_cast<WasmCode::RuntimeStubId>(stub_call_tag));
       it.rinfo()->set_wasm_stub_call_address(code->instruction_start(),
                                              SKIP_ICACHE_FLUSH);
-    } else if (RelocInfo::IsCodeTarget(mode)) {
-      Code* call_target =
-          Code::GetCodeFromTargetAddress(orig_it.rinfo()->target_address());
-      it.rinfo()->set_target_address(
-          GetLocalAddressFor(handle(call_target, call_target->GetIsolate())),
-          SKIP_WRITE_BARRIER, SKIP_ICACHE_FLUSH);
     } else {
       it.rinfo()->apply(delta);
     }
@@ -542,7 +544,6 @@ WasmCode* NativeModule::AddCode(
     source_pos.reset(new byte[source_pos_table->length()]);
     source_pos_table->copy_out(0, source_pos.get(), source_pos_table->length());
   }
-  TurboAssembler* origin = reinterpret_cast<TurboAssembler*>(desc.origin);
   WasmCode* ret = AddOwnedCode(
       {desc.buffer, static_cast<size_t>(desc.instr_size)},
       std::move(reloc_info), static_cast<size_t>(desc.reloc_size),
@@ -552,12 +553,10 @@ WasmCode* NativeModule::AddCode(
       safepoint_table_offset, handler_table_offset,
       std::move(protected_instructions), tier, WasmCode::kNoFlushICache);
 
-  set_code(index, ret);
-
   // Apply the relocation delta by iterating over the RelocInfo.
   AllowDeferredHandleDereference embedding_raw_address;
   intptr_t delta = ret->instructions().start() - desc.buffer;
-  int mode_mask = RelocInfo::kApplyMask | RelocInfo::kCodeTargetMask |
+  int mode_mask = RelocInfo::kApplyMask |
                   RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL);
   for (RelocIterator it(ret->instructions(), ret->reloc_info(),
                         ret->constant_pool(), mode_mask);
@@ -570,18 +569,16 @@ WasmCode* NativeModule::AddCode(
           runtime_stub(static_cast<WasmCode::RuntimeStubId>(stub_call_tag));
       it.rinfo()->set_wasm_stub_call_address(code->instruction_start(),
                                              SKIP_ICACHE_FLUSH);
-    } else if (RelocInfo::IsCodeTarget(mode)) {
-      // rewrite code handles to direct pointers to the first instruction in the
-      // code object
-      Handle<Object> p = it.rinfo()->target_object_handle(origin);
-      Code* code = Code::cast(*p);
-      it.rinfo()->set_target_address(
-          GetLocalAddressFor(handle(code, code->GetIsolate())),
-          SKIP_WRITE_BARRIER, SKIP_ICACHE_FLUSH);
     } else {
       it.rinfo()->apply(delta);
     }
   }
+
+  if (use_trap_handler_) {
+    ret->RegisterTrapHandlerData();
+  }
+  set_code(index, ret);
+  PatchJumpTable(index, ret->instruction_start(), WasmCode::kFlushICache);
 
   // Flush the i-cache here instead of in AddOwnedCode, to include the changes
   // made while iterating over the RelocInfo above.
@@ -626,6 +623,38 @@ Address NativeModule::CreateTrampolineTo(Handle<Code> code) {
   return ret;
 }
 
+WasmCode* NativeModule::CreateEmptyJumpTable(uint32_t num_wasm_functions) {
+  // Only call this if we really need a jump table.
+  DCHECK_LT(0, num_wasm_functions);
+  size_t jump_table_size =
+      num_wasm_functions * JumpTableAssembler::kJumpTableSlotSize;
+  std::unique_ptr<byte[]> instructions(new byte[jump_table_size]);
+  memset(instructions.get(), 0, jump_table_size);
+  return AddOwnedCode({instructions.get(), jump_table_size},  // instructions
+                      nullptr,                                // reloc_info
+                      0,                                      // reloc_size
+                      nullptr,                                // source_pos
+                      0,                                      // source_pos_size
+                      Nothing<uint32_t>(),                    // index
+                      WasmCode::kJumpTable,                   // kind
+                      0,                          // constant_pool_offset
+                      0,                          // stack_slots
+                      0,                          // safepoint_table_offset
+                      0,                          // handler_table_offset
+                      {},                         // protected_instructions
+                      WasmCode::kOther,           // tier
+                      WasmCode::kNoFlushICache);  // flush_icache
+}
+
+void NativeModule::PatchJumpTable(uint32_t func_index, Address target,
+                                  WasmCode::FlushICache flush_icache) {
+  DCHECK_LE(num_imported_functions_, func_index);
+  uint32_t slot_idx = func_index - num_imported_functions_;
+  Address jump_table_slot = jump_table_->instruction_start() +
+                            slot_idx * JumpTableAssembler::kJumpTableSlotSize;
+  JumpTableAssembler::PatchJumpTableSlot(jump_table_slot, target, flush_icache);
+}
+
 Address NativeModule::GetLocalAddressFor(Handle<Code> code) {
   DCHECK(Heap::IsImmovable(*code));
 
@@ -640,17 +669,6 @@ Address NativeModule::GetLocalAddressFor(Handle<Code> code) {
   } else {
     return trampoline_iter->second;
   }
-}
-
-Code* NativeModule::ReverseTrampolineLookup(Address target) {
-  // Uses sub-optimal linear search, but is only used for debugging.
-  for (auto pair : trampolines_) {
-    if (pair.second == target) {
-      return Code::GetCodeFromTargetAddress(pair.first);
-    }
-  }
-  UNREACHABLE();
-  return nullptr;
 }
 
 Address NativeModule::AllocateForCode(size_t size) {
@@ -720,7 +738,7 @@ Address NativeModule::AllocateForCode(size_t size) {
   return mem.start;
 }
 
-WasmCode* NativeModule::Lookup(Address pc) {
+WasmCode* NativeModule::Lookup(Address pc) const {
   if (owned_code_.empty()) return nullptr;
   auto iter = std::upper_bound(owned_code_.begin(), owned_code_.end(), pc,
                                WasmCodeUniquePtrComparator());
@@ -731,84 +749,27 @@ WasmCode* NativeModule::Lookup(Address pc) {
   return candidate->contains(pc) ? candidate : nullptr;
 }
 
-Address NativeModule::GetCallTargetForFunction(uint32_t func_index) {
-  // TODO(clemensh): Introduce a jump table and return a slot of it here.
-  WasmCode* wasm_code = code(func_index);
-  if (!wasm_code) return kNullAddress;
-  if (wasm_code->kind() != WasmCode::kLazyStub) {
-    return wasm_code->instruction_start();
-  }
+Address NativeModule::GetCallTargetForFunction(uint32_t func_index) const {
+  // TODO(clemensh): Measure performance win of returning instruction start
+  // directly if we have turbofan code. Downside: Redirecting functions (e.g.
+  // for debugging) gets much harder.
 
-  DCHECK_IMPLIES(func_index < num_imported_functions_,
-                 !wasm_code->IsAnonymous());
-  if (!wasm_code->IsAnonymous()) {
-    // If the function wasn't imported, its index should match.
-    DCHECK_IMPLIES(func_index >= num_imported_functions_,
-                   func_index == wasm_code->index());
-    return wasm_code->instruction_start();
-  }
-  if (lazy_compile_stubs_ == nullptr) {
-    lazy_compile_stubs_.reset(new WasmCode*[num_functions_]);
-    memset(lazy_compile_stubs_.get(), 0, num_functions_ * sizeof(WasmCode*));
-  }
-  WasmCode* cloned_code = lazy_compile_stubs_[func_index];
-  if (cloned_code == nullptr) {
-    cloned_code = CloneCode(wasm_code, WasmCode::kNoFlushICache);
-    RelocateCode(cloned_code, wasm_code, WasmCode::kFlushICache);
-    cloned_code->index_ = Just(func_index);
-    lazy_compile_stubs_[func_index] = cloned_code;
-  }
-  DCHECK_EQ(func_index, cloned_code->index());
-  return cloned_code->instruction_start();
+  // Return the jump table slot for that function index.
+  DCHECK_NOT_NULL(jump_table_);
+  uint32_t slot_idx = func_index - num_imported_functions_;
+  DCHECK_LT(slot_idx, jump_table_->instructions().size() /
+                          JumpTableAssembler::kJumpTableSlotSize);
+  return jump_table_->instruction_start() +
+         slot_idx * JumpTableAssembler::kJumpTableSlotSize;
 }
 
-WasmCode* NativeModule::CloneCode(const WasmCode* original_code,
-                                  WasmCode::FlushICache flush_icache) {
-  std::unique_ptr<byte[]> reloc_info;
-  if (original_code->reloc_info().size() > 0) {
-    reloc_info.reset(new byte[original_code->reloc_info().size()]);
-    memcpy(reloc_info.get(), original_code->reloc_info().start(),
-           original_code->reloc_info().size());
-  }
-  std::unique_ptr<byte[]> source_pos;
-  if (original_code->source_positions().size() > 0) {
-    source_pos.reset(new byte[original_code->source_positions().size()]);
-    memcpy(source_pos.get(), original_code->source_positions().start(),
-           original_code->source_positions().size());
-  }
-  DCHECK_EQ(0, original_code->protected_instructions().size());
-  std::unique_ptr<ProtectedInstructions> protected_instructions(
-      new ProtectedInstructions(0));
-  WasmCode* ret = AddOwnedCode(
-      original_code->instructions(), std::move(reloc_info),
-      original_code->reloc_info().size(), std::move(source_pos),
-      original_code->source_positions().size(), original_code->index_,
-      original_code->kind(), original_code->constant_pool_offset_,
-      original_code->stack_slots(), original_code->safepoint_table_offset_,
-      original_code->handler_table_offset_, std::move(protected_instructions),
-      original_code->tier(), flush_icache);
-  if (!ret->IsAnonymous()) {
-    set_code(ret->index(), ret);
-  }
-  return ret;
-}
-
-void NativeModule::UnpackAndRegisterProtectedInstructions() {
-  for (WasmCode* wasm_code : code_table()) {
-    if (wasm_code == nullptr) continue;
-    wasm_code->RegisterTrapHandlerData();
-  }
-}
-
-void NativeModule::ReleaseProtectedInstructions() {
-  for (WasmCode* wasm_code : code_table()) {
-    if (wasm_code == nullptr || !wasm_code->HasTrapHandlerIndex()) continue;
-    CHECK_LT(wasm_code->trap_handler_index(),
-             static_cast<size_t>(std::numeric_limits<int>::max()));
-    trap_handler::ReleaseHandlerData(
-        static_cast<int>(wasm_code->trap_handler_index()));
-    wasm_code->ResetTrapHandlerIndex();
-  }
+uint32_t NativeModule::GetFunctionIndexFromJumpTableSlot(Address slot_address) {
+  DCHECK(is_jump_table_slot(slot_address));
+  uint32_t offset =
+      static_cast<uint32_t>(slot_address - jump_table_->instruction_start());
+  uint32_t slot_idx = offset / JumpTableAssembler::kJumpTableSlotSize;
+  DCHECK_LT(slot_idx, num_functions_ - num_imported_functions_);
+  return num_imported_functions_ + slot_idx;
 }
 
 void NativeModule::DisableTrapHandler() {
@@ -893,16 +854,22 @@ void WasmCodeManager::TryAllocate(size_t size, VirtualMemory* ret, void* hint) {
              reinterpret_cast<void*>(ret->end()), ret->size());
 }
 
+// static
 size_t WasmCodeManager::EstimateNativeModuleSize(const WasmModule* module) {
   constexpr size_t kCodeSizeMultiplier = 4;
   constexpr size_t kImportSize = 32 * kPointerSize;
 
+  uint32_t num_functions = static_cast<uint32_t>(module->functions.size());
+  uint32_t num_wasm_functions = num_functions - module->num_imported_functions;
+
   size_t estimate =
       AllocatePageSize() /* TODO(titzer): 1 page spot bonus */ +
       sizeof(NativeModule) +
-      (sizeof(WasmCode*) * module->functions.size() /* code table size */) +
-      (sizeof(WasmCode) * module->functions.size() /* code object size */) +
-      (kImportSize * module->num_imported_functions /* import size */);
+      (sizeof(WasmCode*) * num_wasm_functions /* code table size */) +
+      (sizeof(WasmCode) * num_wasm_functions /* code object size */) +
+      (kImportSize * module->num_imported_functions /* import size */) +
+      (JumpTableAssembler::kJumpTableSlotSize *
+       num_wasm_functions /* jump table size */);
 
   for (auto& function : module->functions) {
     estimate += kCodeSizeMultiplier * function.code.length();
@@ -1037,7 +1004,7 @@ WasmCode* WasmCodeManager::GetCodeFromStartAddress(Address pc) const {
   return code;
 }
 
-WasmCode* WasmCodeManager::LookupCode(Address pc) const {
+NativeModule* WasmCodeManager::LookupNativeModule(Address pc) const {
   if (lookup_map_.empty()) return nullptr;
 
   auto iter = lookup_map_.upper_bound(pc);
@@ -1048,8 +1015,12 @@ WasmCode* WasmCodeManager::LookupCode(Address pc) const {
   NativeModule* candidate = iter->second.second;
 
   DCHECK_NOT_NULL(candidate);
-  if (range_start <= pc && pc < range_end) return candidate->Lookup(pc);
-  return nullptr;
+  return range_start <= pc && pc < range_end ? candidate : nullptr;
+}
+
+WasmCode* WasmCodeManager::LookupCode(Address pc) const {
+  NativeModule* candidate = LookupNativeModule(pc);
+  return candidate ? candidate->Lookup(pc) : nullptr;
 }
 
 void WasmCodeManager::Free(VirtualMemory* mem) {

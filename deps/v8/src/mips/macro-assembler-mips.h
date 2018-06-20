@@ -25,9 +25,13 @@ constexpr Register kInterpreterAccumulatorRegister = v0;
 constexpr Register kInterpreterBytecodeOffsetRegister = t4;
 constexpr Register kInterpreterBytecodeArrayRegister = t5;
 constexpr Register kInterpreterDispatchTableRegister = t6;
+
 constexpr Register kJavaScriptCallArgCountRegister = a0;
 constexpr Register kJavaScriptCallCodeStartRegister = a2;
+constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
 constexpr Register kJavaScriptCallNewTargetRegister = a3;
+constexpr Register kJavaScriptCallExtraArg1Register = a2;
+
 constexpr Register kOffHeapTrampolineRegister = at;
 constexpr Register kRuntimeCallFunctionRegister = a1;
 constexpr Register kRuntimeCallArgCountRegister = a0;
@@ -831,6 +835,16 @@ class TurboAssembler : public TurboAssemblerBase {
   // Jump the register contains a smi.
   void JumpIfSmi(Register value, Label* smi_label, Register scratch = at,
                  BranchDelaySlot bd = PROTECT);
+
+  void JumpIfEqual(Register a, int32_t b, Label* dest) {
+    li(kScratchReg, Operand(b));
+    Branch(dest, eq, a, Operand(kScratchReg));
+  }
+
+  void JumpIfLessThan(Register a, int32_t b, Label* dest) {
+    li(kScratchReg, Operand(b));
+    Branch(dest, lt, a, Operand(kScratchReg));
+  }
 
   // Push a standard frame, consisting of ra, fp, context and JS function.
   void PushStandardFrame(Register function_reg);

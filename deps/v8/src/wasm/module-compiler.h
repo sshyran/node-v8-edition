@@ -47,7 +47,7 @@ std::unique_ptr<CompilationState, CompilationStateDeleter> NewCompilationState(
 ModuleEnv* GetModuleEnv(CompilationState* compilation_state);
 
 MaybeHandle<WasmModuleObject> CompileToModuleObject(
-    Isolate* isolate, ErrorThrower* thrower, std::unique_ptr<WasmModule> module,
+    Isolate* isolate, ErrorThrower* thrower, std::shared_ptr<WasmModule> module,
     const ModuleWireBytes& wire_bytes, Handle<Script> asm_js_script,
     Vector<const byte> asm_js_offset_table_bytes);
 
@@ -65,15 +65,8 @@ V8_EXPORT_PRIVATE Handle<Script> CreateWasmScript(
     Isolate* isolate, const ModuleWireBytes& wire_bytes);
 
 // Triggered by the WasmCompileLazy builtin.
-// Walks the stack (top three frames) to determine the wasm instance involved
-// and which function to compile.
-// Then triggers WasmCompiledModule::CompileLazy, taking care of correctly
-// patching the call site or indirect function tables.
-// Returns either the Code object that has been lazily compiled, or Illegal if
-// an error occurred. In the latter case, a pending exception has been set,
-// which will be triggered when returning from the runtime function, i.e. the
-// Illegal builtin will never be called.
-Address CompileLazy(Isolate* isolate, Handle<WasmInstanceObject> instance);
+// Returns the instruction start of the compiled code object.
+Address CompileLazy(Isolate*, NativeModule*, uint32_t func_index);
 
 // Encapsulates all the state and steps of an asynchronous compilation.
 // An asynchronous compile job consists of a number of tasks that are executed
@@ -150,11 +143,11 @@ class AsyncCompileJob {
   ModuleWireBytes wire_bytes_;
   Handle<Context> context_;
   std::unique_ptr<CompilationResultResolver> resolver_;
-  std::unique_ptr<WasmModule> module_;
+  std::shared_ptr<WasmModule> module_;
 
   std::vector<DeferredHandles*> deferred_handles_;
-  Handle<WasmCompiledModule> compiled_module_;
   Handle<WasmModuleObject> module_object_;
+  NativeModule* native_module_ = nullptr;
 
   std::unique_ptr<CompileStep> step_;
   CancelableTaskManager background_task_manager_;

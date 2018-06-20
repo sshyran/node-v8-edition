@@ -88,9 +88,9 @@ class CodeGenerator final : public GapResolver::Assembler {
 
   // Generate native code. After calling AssembleCode, call FinalizeCode to
   // produce the actual code object. If an error occurs during either phase,
-  // FinalizeCode returns a null handle.
+  // FinalizeCode returns an empty MaybeHandle.
   void AssembleCode();  // Does not need to run on main thread.
-  Handle<Code> FinalizeCode();
+  MaybeHandle<Code> FinalizeCode();
 
   Handle<ByteArray> GetSourcePositionTable();
 
@@ -125,6 +125,8 @@ class CodeGenerator final : public GapResolver::Assembler {
 
   const ZoneVector<int>& block_starts() const { return block_starts_; }
   const ZoneVector<int>& instr_starts() const { return instr_starts_; }
+
+  static constexpr int kBinarySearchSwitchMinimalCases = 4;
 
  private:
   GapResolver* resolver() { return &resolver_; }
@@ -198,6 +200,10 @@ class CodeGenerator final : public GapResolver::Assembler {
 
   void AssembleArchBoolean(Instruction* instr, FlagsCondition condition);
   void AssembleArchTrap(Instruction* instr, FlagsCondition condition);
+  void AssembleArchBinarySearchSwitchRange(Register input, RpoNumber def_block,
+                                           std::pair<int32_t, Label*>* begin,
+                                           std::pair<int32_t, Label*>* end);
+  void AssembleArchBinarySearchSwitch(Instruction* instr);
   void AssembleArchLookupSwitch(Instruction* instr);
   void AssembleArchTableSwitch(Instruction* instr);
 

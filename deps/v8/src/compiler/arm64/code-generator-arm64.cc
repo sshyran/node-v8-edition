@@ -601,11 +601,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
   ArchOpcode arch_opcode = ArchOpcodeField::decode(opcode);
   switch (arch_opcode) {
     case kArchCallCodeObject: {
-      // We must not share code targets for calls to builtins for wasm code, as
-      // they might need to be patched individually.
-      internal::Assembler::BlockCodeTargetSharingScope scope;
-      if (info()->IsWasm()) scope.Open(tasm());
-
       if (instr->InputAt(0)->IsImmediate()) {
         __ Call(i.InputCode(0), RelocInfo::CODE_TARGET);
       } else {
@@ -635,11 +630,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArchTailCallCodeObjectFromJSFunction:
     case kArchTailCallCodeObject: {
-      // We must not share code targets for calls to builtins for wasm code, as
-      // they might need to be patched individually.
-      internal::Assembler::BlockCodeTargetSharingScope scope;
-      if (info()->IsWasm()) scope.Open(tasm());
-
       if (arch_opcode == kArchTailCallCodeObjectFromJSFunction) {
         AssemblePopArgumentsAdaptorFrame(kJavaScriptCallArgCountRegister,
                                          i.TempRegister(0), i.TempRegister(1),
@@ -775,6 +765,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTableSwitch:
       AssembleArchTableSwitch(instr);
       break;
+    case kArchBinarySearchSwitch:
+      AssembleArchBinarySearchSwitch(instr);
+      break;
     case kArchLookupSwitch:
       AssembleArchLookupSwitch(instr);
       break;
@@ -829,9 +822,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       } else {
         __ mov(i.OutputRegister(), fp);
       }
-      break;
-    case kArchRootsPointer:
-      __ mov(i.OutputRegister(), kRootRegister);
       break;
     case kArchTruncateDoubleToI:
       __ TruncateDoubleToI(isolate(), zone(), i.OutputRegister(),
@@ -2312,6 +2302,16 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
   __ Cset(reg, cc);
 }
 
+void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
+  Arm64OperandConverter i(this, instr);
+  Register input = i.InputRegister32(0);
+  std::vector<std::pair<int32_t, Label*>> cases;
+  for (size_t index = 2; index < instr->InputCount(); index += 2) {
+    cases.push_back({i.InputInt32(index + 0), GetLabel(i.InputRpo(index + 1))});
+  }
+  AssembleArchBinarySearchSwitchRange(input, i.InputRpo(1), cases.data(),
+                                      cases.data() + cases.size());
+}
 
 void CodeGenerator::AssembleArchLookupSwitch(Instruction* instr) {
   Arm64OperandConverter i(this, instr);

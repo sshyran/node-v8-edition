@@ -159,7 +159,7 @@ RUNTIME_FUNCTION(Runtime_WasmGetExceptionRuntimeId) {
   if (!except_obj.is_null() && except_obj->IsJSReceiver()) {
     Handle<JSReceiver> exception(JSReceiver::cast(*except_obj));
     Handle<Object> tag;
-    if (JSReceiver::GetProperty(exception,
+    if (JSReceiver::GetProperty(isolate, exception,
                                 isolate->factory()->InternalizeUtf8String(
                                     wasm::WasmException::kRuntimeIdStr))
             .ToHandle(&tag)) {
@@ -181,7 +181,7 @@ RUNTIME_FUNCTION(Runtime_WasmExceptionGetElement) {
   if (!except_obj.is_null() && except_obj->IsJSReceiver()) {
     Handle<JSReceiver> exception(JSReceiver::cast(*except_obj));
     Handle<Object> values_obj;
-    if (JSReceiver::GetProperty(exception,
+    if (JSReceiver::GetProperty(isolate, exception,
                                 isolate->factory()->InternalizeUtf8String(
                                     wasm::WasmException::kRuntimeValuesStr))
             .ToHandle(&values_obj)) {
@@ -209,7 +209,7 @@ RUNTIME_FUNCTION(Runtime_WasmExceptionSetElement) {
   if (!except_obj.is_null() && except_obj->IsJSReceiver()) {
     Handle<JSReceiver> exception(JSReceiver::cast(*except_obj));
     Handle<Object> values_obj;
-    if (JSReceiver::GetProperty(exception,
+    if (JSReceiver::GetProperty(isolate, exception,
                                 isolate->factory()->InternalizeUtf8String(
                                     wasm::WasmException::kRuntimeValuesStr))
             .ToHandle(&values_obj)) {
@@ -291,8 +291,9 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
 
 RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
   HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
+  DCHECK_EQ(2, args.length());
   CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
+  CONVERT_SMI_ARG_CHECKED(func_index, 1);
 
   ClearThreadInWasmScope wasm_flag(true);
 
@@ -306,7 +307,8 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
   DCHECK_EQ(*instance, WasmCompileLazyFrame::cast(it.frame())->wasm_instance());
 #endif
 
-  Address entrypoint = wasm::CompileLazy(isolate, instance);
+  Address entrypoint = wasm::CompileLazy(
+      isolate, instance->compiled_module()->GetNativeModule(), func_index);
   return reinterpret_cast<Object*>(entrypoint);
 }
 

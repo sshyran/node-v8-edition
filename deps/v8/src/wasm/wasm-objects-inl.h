@@ -52,13 +52,17 @@ CAST_ACCESSOR(WasmTableObject)
 ACCESSORS(WasmModuleObject, compiled_module, WasmCompiledModule,
           kCompiledModuleOffset)
 ACCESSORS(WasmModuleObject, export_wrappers, FixedArray, kExportWrappersOffset)
-ACCESSORS(WasmModuleObject, managed_module, Object, kManagedModuleOffset)
+ACCESSORS(WasmModuleObject, managed_module, Managed<wasm::WasmModule>,
+          kManagedModuleOffset)
 ACCESSORS(WasmModuleObject, module_bytes, SeqOneByteString, kModuleBytesOffset)
 ACCESSORS(WasmModuleObject, script, Script, kScriptOffset)
 OPTIONAL_ACCESSORS(WasmModuleObject, asm_js_offset_table, ByteArray,
                    kAsmJsOffsetTableOffset)
 OPTIONAL_ACCESSORS(WasmModuleObject, breakpoint_infos, FixedArray,
                    kBreakPointInfosOffset)
+wasm::WasmModule* WasmModuleObject::module() const {
+  return managed_module()->raw();
+}
 void WasmModuleObject::reset_breakpoint_infos() {
   WRITE_FIELD(this, kBreakPointInfosOffset, GetHeap()->undefined_value());
 }
@@ -165,8 +169,6 @@ OPTIONAL_ACCESSORS(WasmInstanceObject, indirect_function_table_instances,
                    FixedArray, kIndirectFunctionTableInstancesOffset)
 OPTIONAL_ACCESSORS(WasmInstanceObject, managed_native_allocations, Foreign,
                    kManagedNativeAllocationsOffset)
-OPTIONAL_ACCESSORS(WasmInstanceObject, managed_indirect_patcher, Foreign,
-                   kManagedIndirectPatcherOffset)
 ACCESSORS(WasmInstanceObject, undefined_value, Oddball, kUndefinedValueOffset)
 ACCESSORS(WasmInstanceObject, null_value, Oddball, kNullValueOffset)
 ACCESSORS(WasmInstanceObject, centry_stub, Code, kCEntryStubOffset)

@@ -268,7 +268,7 @@ NativeModuleSerializer::NativeModuleSerializer(Isolate* isolate,
 }
 
 size_t NativeModuleSerializer::MeasureCode(const WasmCode* code) const {
-  if (code->kind() == WasmCode::kLazyStub) return sizeof(size_t);
+  if (code == nullptr) return sizeof(size_t);
   DCHECK_EQ(WasmCode::kFunction, code->kind());
   return kCodeHeaderSize + code->instructions().size() +
          code->reloc_info().size() + code->source_positions().size() +
@@ -290,7 +290,7 @@ void NativeModuleSerializer::WriteHeader(Writer* writer) {
 }
 
 void NativeModuleSerializer::WriteCode(const WasmCode* code, Writer* writer) {
-  if (code->kind() == WasmCode::kLazyStub) {
+  if (code == nullptr) {
     writer->Write(size_t{0});
     return;
   }
@@ -500,6 +500,8 @@ bool NativeModuleDeserializer::ReadCode(uint32_t fn_index, Reader* reader) {
       handler_table_offset, std::move(protected_instructions), tier,
       WasmCode::kNoFlushICache);
   native_module_->set_code(fn_index, ret);
+  native_module_->PatchJumpTable(fn_index, ret->instruction_start(),
+                                 WasmCode::kFlushICache);
 
   // Relocate the code.
   int mask = RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
@@ -581,6 +583,7 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
                            i::wasm::kWasmOrigin);
   if (!decode_result.ok()) return {};
   CHECK_NOT_NULL(decode_result.val);
+  WasmModule* module = decode_result.val.get();
   Handle<String> module_bytes =
       isolate->factory()
           ->NewStringFromOneByte(
@@ -588,13 +591,6 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
               TENURED)
           .ToHandleChecked();
   DCHECK(module_bytes->IsSeqOneByteString());
-  // The {managed_module} will take ownership of the {WasmModule} object,
-  // and it will be destroyed when the GC reclaims it.
-  WasmModule* module = decode_result.val.get();
-  size_t module_size = EstimateWasmModuleSize(module);
-  Handle<Managed<WasmModule>> managed_module =
-      Managed<WasmModule>::FromUniquePtr(isolate, module_size,
-                                         std::move(decode_result.val));
   Handle<Script> script = CreateWasmScript(isolate, wire_bytes);
   int export_wrappers_size = static_cast<int>(module->num_exported_functions);
   Handle<FixedArray> export_wrappers = isolate->factory()->NewFixedArray(
@@ -606,9 +602,14 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
       trap_handler::IsTrapHandlerEnabled() ? kUseTrapHandler : kNoTrapHandler;
   wasm::ModuleEnv env(module, use_trap_handler,
                       wasm::RuntimeExceptionSupport::kRuntimeExceptionSupport);
-  Handle<WasmCompiledModule> compiled_module =
-      WasmCompiledModule::New(isolate, module, env);
+  Handle<WasmModuleObject> module_object = WasmModuleObject::New(
+      isolate, export_wrappers, std::move(decode_result.val), env,
+      Handle<SeqOneByteString>::cast(module_bytes), script,
+      Handle<ByteArray>::null());
+  Handle<WasmCompiledModule> compiled_module(module_object->compiled_module(),
+                                             isolate);
   NativeModule* native_module = compiled_module->GetNativeModule();
+
   if (FLAG_wasm_lazy_compilation) {
     native_module->SetLazyBuiltin(BUILTIN_CODE(isolate, WasmCompileLazy));
   }
@@ -616,12 +617,6 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
 
   Reader reader(data + kVersionSize);
   if (!deserializer.Read(&reader)) return {};
-
-  Handle<WasmModuleObject> module_object = WasmModuleObject::New(
-      isolate, compiled_module, export_wrappers, managed_module,
-      Handle<SeqOneByteString>::cast(module_bytes), script,
-      Handle<ByteArray>::null());
-  native_module->SetModuleObject(module_object);
 
   // TODO(6792): Wrappers below might be cloned using {Factory::CopyCode}. This
   // requires unlocking the code space here. This should eventually be moved
@@ -634,7 +629,7 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
   WasmCompiledModule::Reset(isolate, *compiled_module);
 
   // Log the code within the generated module for profiling.
-  compiled_module->LogWasmCodes(isolate);
+  native_module->LogWasmCodes(isolate);
 
   return module_object;
 }

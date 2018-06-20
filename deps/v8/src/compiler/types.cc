@@ -132,7 +132,7 @@ Type::bitset Type::BitsetLub() const {
   UNREACHABLE();
 }
 
-Type::bitset BitsetType::Lub(HeapReferenceType const& type) {
+Type::bitset BitsetType::Lub(HeapObjectType const& type) {
   switch (type.instance_type()) {
     case CONS_STRING_TYPE:
     case CONS_ONE_BYTE_STRING_TYPE:
@@ -162,21 +162,24 @@ Type::bitset BitsetType::Lub(HeapReferenceType const& type) {
       return kSymbol;
     case BIGINT_TYPE:
       return kBigInt;
-    case ODDBALL_TYPE: {
+    case ODDBALL_TYPE:
       switch (type.oddball_type()) {
-        case HeapReferenceType::kHole:
+        case HeapObjectType::kHole:
           return kHole;
-        case HeapReferenceType::kBoolean:
+        case HeapObjectType::kBoolean:
           return kBoolean;
-        case HeapReferenceType::kNull:
+        case HeapObjectType::kNull:
           return kNull;
-        case HeapReferenceType::kUndefined:
+        case HeapObjectType::kUndefined:
           return kUndefined;
-        case HeapReferenceType::kUnknown:
+        case HeapObjectType::kOther:
+          // TODO(neis): We should add a kOtherOddball type.
           return kOtherInternal;
+        case HeapObjectType::kAny:
+          return kOddball | kOtherInternal;
+        default:
+          UNREACHABLE();
       }
-      UNREACHABLE();
-    }
     case HEAP_NUMBER_TYPE:
       return kNumber;
     case JS_OBJECT_TYPE:
@@ -444,8 +447,12 @@ bool OtherNumberConstantType::IsOtherNumberConstant(double value) {
 }
 
 HeapConstantType::HeapConstantType(BitsetType::bitset bitset,
-                                   const HeapReference& heap_ref)
+                                   const HeapObjectRef& heap_ref)
     : TypeBase(kHeapConstant), bitset_(bitset), heap_ref_(heap_ref) {}
+
+Handle<HeapObject> HeapConstantType::Value() const {
+  return heap_ref_.object<HeapObject>();
+}
 
 // -----------------------------------------------------------------------------
 // Predicates.
@@ -808,9 +815,9 @@ Type Type::NewConstant(const JSHeapBroker* js_heap_broker,
     return NewConstant(static_cast<double>(maybe_smi.value()), zone);
   }
 
-  HeapReference heap_ref = js_heap_broker->HeapReferenceForObject(value);
-  if (heap_ref.IsNumber()) {
-    return NewConstant(heap_ref.AsNumber().value(), zone);
+  HeapObjectRef heap_ref(value);
+  if (heap_ref.IsHeapNumber()) {
+    return NewConstant(heap_ref.AsHeapNumber().value(), zone);
   }
 
   if (heap_ref.IsString() && !heap_ref.IsInternalizedString()) {
@@ -1044,8 +1051,8 @@ Type Type::OtherNumberConstant(double value, Zone* zone) {
 // static
 Type Type::HeapConstant(const JSHeapBroker* js_heap_broker,
                         Handle<i::Object> value, Zone* zone) {
-  return FromTypeBase(HeapConstantType::New(
-      js_heap_broker, js_heap_broker->HeapReferenceForObject(value), zone));
+  return FromTypeBase(
+      HeapConstantType::New(js_heap_broker, HeapObjectRef(value), zone));
 }
 
 // static

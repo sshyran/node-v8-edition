@@ -869,9 +869,10 @@ MaybeHandle<Object> Object::GetProperty(Handle<Object> object,
   return GetProperty(&it);
 }
 
-MaybeHandle<Object> JSReceiver::GetProperty(Handle<JSReceiver> receiver,
+MaybeHandle<Object> JSReceiver::GetProperty(Isolate* isolate,
+                                            Handle<JSReceiver> receiver,
                                             Handle<Name> name) {
-  LookupIterator it(receiver, name, receiver);
+  LookupIterator it(isolate, receiver, name, receiver);
   if (!it.IsFound()) return it.factory()->undefined_value();
   return Object::GetProperty(&it);
 }
@@ -924,7 +925,7 @@ MaybeHandle<Object> JSReceiver::GetProperty(Isolate* isolate,
                                             Handle<JSReceiver> receiver,
                                             const char* name) {
   Handle<String> str = isolate->factory()->InternalizeUtf8String(name);
-  return GetProperty(receiver, str);
+  return GetProperty(isolate, receiver, str);
 }
 
 // static
@@ -1002,7 +1003,6 @@ void HeapObject::VerifySmiField(int offset) {
 }
 #endif
 
-
 Heap* HeapObject::GetHeap() const {
   Heap* heap = MemoryChunk::FromAddress(
                    reinterpret_cast<Address>(const_cast<HeapObject*>(this)))
@@ -1016,7 +1016,19 @@ Isolate* HeapObject::GetIsolate() const {
   return GetHeap()->isolate();
 }
 
-Isolate* JSReceiver::GetIsolate() const { return GetHeap()->isolate(); }
+Heap* NeverReadOnlySpaceObject::GetHeap() const {
+  MemoryChunk* chunk =
+      MemoryChunk::FromAddress(reinterpret_cast<Address>(this));
+  // Make sure we are not accessing an object in RO space.
+  SLOW_DCHECK(chunk->owner()->identity() != RO_SPACE);
+  Heap* heap = chunk->heap();
+  SLOW_DCHECK(heap != nullptr);
+  return heap;
+}
+
+Isolate* NeverReadOnlySpaceObject::GetIsolate() const {
+  return GetHeap()->isolate();
+}
 
 Map* HeapObject::map() const {
   return map_word().ToMap();

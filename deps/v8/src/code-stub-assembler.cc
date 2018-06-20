@@ -1894,7 +1894,7 @@ TNode<MaybeObject> CodeStubAssembler::LoadArrayElement(
                 PropertyArray::kLengthAndHashOffset);
   // Check that index_node + additional_offset <= object.length.
   // TODO(cbruni): Use proper LoadXXLength helpers
-  CSA_SLOW_ASSERT(
+  CSA_ASSERT(
       this,
       IsOffsetInBounds(
           offset,
@@ -1921,6 +1921,12 @@ TNode<Object> CodeStubAssembler::LoadFixedArrayElement(
   // This function is currently used for non-FixedArrays (e.g., PropertyArrays)
   // and thus the reasonable assert IsFixedArraySubclass(object) is
   // untrue. TODO(marja): Fix.
+  CSA_SLOW_ASSERT(
+      this, Word32Or(IsHashTable(object),
+                     Word32Or(IsFixedArray(object),
+                              Word32Or(IsPropertyArray(object),
+                                       Word32Or(IsEphemeronHashTable(object),
+                                                IsContext(object))))));
   CSA_ASSERT(this, IsNotWeakFixedArraySubclass(object));
   TNode<MaybeObject> element =
       LoadArrayElement(object, FixedArray::kHeaderSize, index_node,
@@ -2517,12 +2523,28 @@ Node* CodeStubAssembler::StoreFixedArrayElement(Node* object, Node* index_node,
       FixedArray::kHeaderSize + additional_offset - kHeapObjectTag;
   Node* offset = ElementOffsetFromIndex(index_node, HOLEY_ELEMENTS,
                                         parameter_mode, header_size);
-  // TODO(cbruni): Enable check once we have TNodes in this method. Currently
-  // the bounds check will fail for PropertyArray due to the different length
-  // encoding.
-  // CSA_ASSERT(this,
-  //         IsOffsetInBounds(offset, LoadAndUntagFixedArrayBaseLength(object),
-  //                             FixedArray::kHeaderSize));
+  STATIC_ASSERT(FixedArrayBase::kLengthOffset == WeakFixedArray::kLengthOffset);
+  STATIC_ASSERT(FixedArrayBase::kLengthOffset ==
+                PropertyArray::kLengthAndHashOffset);
+  // Check that index_node + additional_offset <= object.length.
+  // TODO(cbruni): Use proper LoadXXLength helpers
+  CSA_ASSERT(
+      this,
+      IsOffsetInBounds(
+          offset,
+          Select<IntPtrT>(
+              IsPropertyArray(object),
+              [=] {
+                TNode<IntPtrT> length_and_hash = LoadAndUntagObjectField(
+                    object, PropertyArray::kLengthAndHashOffset);
+                return TNode<IntPtrT>::UncheckedCast(
+                    DecodeWord<PropertyArray::LengthField>(length_and_hash));
+              },
+              [=] {
+                return LoadAndUntagObjectField(object,
+                                               FixedArrayBase::kLengthOffset);
+              }),
+          FixedArray::kHeaderSize));
   if (barrier_mode == SKIP_WRITE_BARRIER) {
     return StoreNoWriteBarrier(MachineRepresentation::kTagged, object, offset,
                                value);
@@ -7331,7 +7353,7 @@ void CodeStubAssembler::NumberDictionaryLookup(
   }
 }
 
-TNode<Object> CodeStubAssembler::LoadNumberDictionaryElement(
+TNode<Object> CodeStubAssembler::BasicLoadNumberDictionaryElement(
     TNode<NumberDictionary> dictionary, TNode<IntPtrT> intptr_index,
     Label* not_data, Label* if_hole) {
   TVARIABLE(IntPtrT, var_entry);
@@ -7347,8 +7369,32 @@ TNode<Object> CodeStubAssembler::LoadNumberDictionaryElement(
   TNode<Uint32T> kind = DecodeWord32<PropertyDetails::KindField>(details);
   // TODO(jkummerow): Support accessors without missing?
   GotoIfNot(Word32Equal(kind, Int32Constant(kData)), not_data);
-  // Finally, load athe value.
+  // Finally, load the value.
   return LoadValueByKeyIndex<NumberDictionary>(dictionary, index);
+}
+
+void CodeStubAssembler::BasicStoreNumberDictionaryElement(
+    TNode<NumberDictionary> dictionary, TNode<IntPtrT> intptr_index,
+    TNode<Object> value, Label* fail, Label* if_hole) {
+  TVARIABLE(IntPtrT, var_entry);
+  Label if_found(this);
+  NumberDictionaryLookup(dictionary, intptr_index, &if_found, &var_entry,
+                         if_hole);
+  BIND(&if_found);
+
+  // Check that the value is a data property.
+  TNode<IntPtrT> index = EntryToIndex<NumberDictionary>(var_entry.value());
+  TNode<Uint32T> details =
+      LoadDetailsByKeyIndex<NumberDictionary>(dictionary, index);
+  TNode<Uint32T> kind = DecodeWord32<PropertyDetails::KindField>(details);
+  // TODO(jkummerow): Support accessors without missing?
+  GotoIfNot(Word32Equal(kind, Int32Constant(kData)), fail);
+
+  // Check that the property is writeable.
+  GotoIf(IsSetWord32(details, PropertyDetails::kAttributesReadOnlyMask), fail);
+
+  // Finally, store the value.
+  StoreValueByKeyIndex<NumberDictionary>(dictionary, index, value);
 }
 
 template <class Dictionary>
@@ -11216,7 +11262,7 @@ Node* CodeStubAssembler::InstanceOf(Node* object, Node* callable,
     //
     // Call to Function.prototype[@@hasInstance] directly.
     Callable builtin(BUILTIN_CODE(isolate(), FunctionPrototypeHasInstance),
-                     CallTrampolineDescriptor(isolate()));
+                     CallTrampolineDescriptor{});
     Node* result = CallJS(builtin, context, inst_of_handler, callable, object);
     var_result.Bind(result);
     Goto(&return_result);

@@ -327,6 +327,7 @@ void PerfBasicLogger::LogRecordedBuffer(AbstractCode* code, SharedFunctionInfo*,
                                         const char* name, int length) {
   if (FLAG_perf_basic_prof_only_functions &&
       (code->kind() != AbstractCode::INTERPRETED_FUNCTION &&
+       code->kind() != AbstractCode::BUILTIN &&
        code->kind() != AbstractCode::OPTIMIZED_FUNCTION)) {
     return;
   }
@@ -2022,7 +2023,7 @@ void ExistingCodeLogger::LogCodeObject(Object* object) {
       break;
     case AbstractCode::BUILTIN:
       if (Code::cast(object)->is_interpreter_trampoline_builtin() &&
-          Code::cast(object) ==
+          Code::cast(object) !=
               *BUILTIN_CODE(isolate_, InterpreterEntryTrampoline)) {
         return;
       }
@@ -2094,7 +2095,7 @@ void ExistingCodeLogger::LogCompiledFunctions() {
   ScopedVector<Handle<WasmCompiledModule>> modules(compiled_wasm_modules_count);
   EnumerateWasmModules(heap, modules.start());
   for (int i = 0; i < compiled_wasm_modules_count; ++i) {
-    modules[i]->LogWasmCodes(isolate_);
+    modules[i]->GetNativeModule()->LogWasmCodes(isolate_);
   }
 }
 

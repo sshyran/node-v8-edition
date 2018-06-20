@@ -41,6 +41,8 @@ ScopeIterator::ScopeIterator(Isolate* isolate, FrameInspector* frame_inspector,
 ScopeIterator::~ScopeIterator() { delete info_; }
 
 Handle<Object> ScopeIterator::GetFunctionDebugName() const {
+  if (!function_.is_null()) return JSFunction::GetDebugName(function_);
+
   if (!context_->IsNativeContext()) {
     DisallowHeapAllocation no_gc;
     ScopeInfo* closure_info = context_->closure_context()->scope_info();
@@ -56,6 +58,7 @@ ScopeIterator::ScopeIterator(Isolate* isolate, Handle<JSFunction> function)
       script_(Script::cast(function->shared()->script())) {
   if (!function->shared()->IsSubjectToDebugging()) {
     context_ = Handle<Context>();
+    return;
   }
   UnwrapEvaluationContext();
 }
@@ -363,7 +366,7 @@ Handle<JSObject> ScopeIterator::ScopeObject(Mode mode) {
 
   Handle<JSObject> scope = isolate_->factory()->NewJSObjectWithNullProto();
   auto visitor = [=](Handle<String> name, Handle<Object> value) {
-    JSObject::AddProperty(scope, name, value, NONE);
+    JSObject::AddProperty(isolate_, scope, name, value, NONE);
     return false;
   };
 

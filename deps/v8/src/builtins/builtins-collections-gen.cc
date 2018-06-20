@@ -82,7 +82,9 @@ class BaseCollectionsAssembler : public CodeStubAssembler {
 
   // Main entry point for a collection constructor builtin.
   void GenerateConstructor(Variant variant,
-                           Handle<String> constructor_function_name);
+                           Handle<String> constructor_function_name,
+                           TNode<Object> new_target, TNode<IntPtrT> argc,
+                           TNode<Context> context);
 
   // Retrieves the collection function that adds an entry. `set` for Maps and
   // `add` for Sets.
@@ -354,13 +356,11 @@ TNode<Object> BaseCollectionsAssembler::AllocateJSCollectionSlow(
 }
 
 void BaseCollectionsAssembler::GenerateConstructor(
-    Variant variant, Handle<String> constructor_function_name) {
+    Variant variant, Handle<String> constructor_function_name,
+    TNode<Object> new_target, TNode<IntPtrT> argc, TNode<Context> context) {
   const int kIterableArg = 0;
-  CodeStubArguments args(
-      this, ChangeInt32ToIntPtr(Parameter(BuiltinDescriptor::kArgumentsCount)));
+  CodeStubArguments args(this, argc);
   TNode<Object> iterable = args.GetOptionalArgumentValue(kIterableArg);
-  TNode<Object> new_target = CAST(Parameter(BuiltinDescriptor::kNewTarget));
-  TNode<Context> context = CAST(Parameter(BuiltinDescriptor::kContext));
 
   Label if_undefined(this, Label::kDeferred);
   GotoIf(IsUndefined(new_target), &if_undefined);
@@ -745,11 +745,23 @@ TNode<Object> CollectionsBuiltinsAssembler::AllocateTable(
 }
 
 TF_BUILTIN(MapConstructor, CollectionsBuiltinsAssembler) {
-  GenerateConstructor(kMap, isolate()->factory()->Map_string());
+  TNode<Object> new_target = CAST(Parameter(Descriptor::kJSNewTarget));
+  TNode<IntPtrT> argc =
+      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+
+  GenerateConstructor(kMap, isolate()->factory()->Map_string(), new_target,
+                      argc, context);
 }
 
 TF_BUILTIN(SetConstructor, CollectionsBuiltinsAssembler) {
-  GenerateConstructor(kSet, isolate()->factory()->Set_string());
+  TNode<Object> new_target = CAST(Parameter(Descriptor::kJSNewTarget));
+  TNode<IntPtrT> argc =
+      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+
+  GenerateConstructor(kSet, isolate()->factory()->Set_string(), new_target,
+                      argc, context);
 }
 
 Node* CollectionsBuiltinsAssembler::CallGetOrCreateHashRaw(Node* const key) {
@@ -1526,8 +1538,8 @@ TF_BUILTIN(MapPrototypeGetSize, CollectionsBuiltinsAssembler) {
 
 TF_BUILTIN(MapPrototypeForEach, CollectionsBuiltinsAssembler) {
   const char* const kMethodName = "Map.prototype.forEach";
-  Node* const argc = Parameter(BuiltinDescriptor::kArgumentsCount);
-  Node* const context = Parameter(BuiltinDescriptor::kContext);
+  Node* const argc = Parameter(Descriptor::kJSActualArgumentsCount);
+  Node* const context = Parameter(Descriptor::kContext);
   CodeStubArguments args(this, ChangeInt32ToIntPtr(argc));
   Node* const receiver = args.GetReceiver();
   Node* const callback = args.GetOptionalArgumentValue(0);
@@ -1757,8 +1769,8 @@ TF_BUILTIN(SetPrototypeGetSize, CollectionsBuiltinsAssembler) {
 
 TF_BUILTIN(SetPrototypeForEach, CollectionsBuiltinsAssembler) {
   const char* const kMethodName = "Set.prototype.forEach";
-  Node* const argc = Parameter(BuiltinDescriptor::kArgumentsCount);
-  Node* const context = Parameter(BuiltinDescriptor::kContext);
+  Node* const argc = Parameter(Descriptor::kJSActualArgumentsCount);
+  Node* const context = Parameter(Descriptor::kContext);
   CodeStubArguments args(this, ChangeInt32ToIntPtr(argc));
   Node* const receiver = args.GetReceiver();
   Node* const callback = args.GetOptionalArgumentValue(0);
@@ -2224,11 +2236,23 @@ TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::ValueIndexFromKeyIndex(
 }
 
 TF_BUILTIN(WeakMapConstructor, WeakCollectionsBuiltinsAssembler) {
-  GenerateConstructor(kWeakMap, isolate()->factory()->WeakMap_string());
+  TNode<Object> new_target = CAST(Parameter(Descriptor::kJSNewTarget));
+  TNode<IntPtrT> argc =
+      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+
+  GenerateConstructor(kWeakMap, isolate()->factory()->WeakMap_string(),
+                      new_target, argc, context);
 }
 
 TF_BUILTIN(WeakSetConstructor, WeakCollectionsBuiltinsAssembler) {
-  GenerateConstructor(kWeakSet, isolate()->factory()->WeakSet_string());
+  TNode<Object> new_target = CAST(Parameter(Descriptor::kJSNewTarget));
+  TNode<IntPtrT> argc =
+      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+
+  GenerateConstructor(kWeakSet, isolate()->factory()->WeakSet_string(),
+                      new_target, argc, context);
 }
 
 TF_BUILTIN(WeakMapLookupHashIndex, WeakCollectionsBuiltinsAssembler) {
